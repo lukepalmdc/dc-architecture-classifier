@@ -45,7 +45,7 @@ def parse_args():
     p.add_argument("--no-weights",     dest="use_weights", action="store_false")
     p.add_argument("--prompts",        type=str, default="prompts.json",
                    help="Path to prompts JSON, or 'build' to use build_prompts()")
-    p.add_argument("--temperature",    type=float, default=0.07)
+    p.add_argument("--temperature",    type=float, default=0.3)
     p.add_argument("--out-dir",        type=str, default="outputs")
     p.add_argument("--name",           type=str, default="default",
                    help="Experiment name (used as output subdirectory)")
