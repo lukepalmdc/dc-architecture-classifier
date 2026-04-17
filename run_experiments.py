@@ -22,22 +22,19 @@ else:
 
 EXPERIMENTS = [
     {
-        "name": "build_prompts_no_proto",
-        "args": ["--no-prototypes", "--no-weights", "--no-tune-alpha", "--prompts", "build"],
-    },
-    {
-        "name": "build_prompts_full",
-        "args": ["--use-prototypes", "--use-weights", "--tune-alpha", "--prompts", "build"],
-    },
-    {
-        "name": "build_prompts_full_temp_01",
-        "args": ["--use-prototypes", "--use-weights", "--tune-alpha",
-                 "--temperature", "0.1", "--prompts", "build"],
-    },
-    {
         "name": "build_prompts_full_temp_02",
         "args": ["--use-prototypes", "--use-weights", "--tune-alpha",
                  "--temperature", "0.2", "--prompts", "build"],
+    },
+    {
+        "name": "build_prompts_full_temp_03",
+        "args": ["--use-prototypes", "--use-weights", "--tune-alpha",
+                 "--temperature", "0.3", "--prompts", "build"],
+    },
+    {
+        "name": "build_prompts_full_temp_04",
+        "args": ["--use-prototypes", "--use-weights", "--tune-alpha",
+                 "--temperature", "0.4", "--prompts", "build"],
     },
 ]
 
