@@ -68,6 +68,9 @@ def parse_args():
     p.add_argument("--out",         default=None, help="Save results JSON to this path")
     p.add_argument("--save-viz",    action="store_true",
                    help="Save annotated image alongside each input")
+    p.add_argument("--sample",      type=int, default=None,
+                   help="Randomly sample N images for testing (default: all)")
+    p.add_argument("--seed",        type=int, default=42)
     return p.parse_args()
 
 
@@ -284,6 +287,11 @@ def main():
         sorted(input_path.glob("*.jpg")) + sorted(input_path.glob("*.png"))
         if input_path.is_dir() else [input_path]
     )
+    if args.sample and args.sample < len(image_paths):
+        rng = np.random.default_rng(args.seed)
+        image_paths = list(rng.choice(image_paths, size=args.sample, replace=False))
+        print(f"Sampled {args.sample} images (seed={args.seed})")
+
     print(f"Processing {len(image_paths)} image(s)...\n")
 
     all_results = []
