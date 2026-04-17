@@ -10,3 +10,7 @@ aiohttp
 aiofiles
 shapely
 pytest
+streamlit
+seaborn
+transformers
+scipy
