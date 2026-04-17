@@ -419,12 +419,12 @@ def run_inference(image_paths, prototypes=None, prompt_weights=None, proto_weigh
             feats /= feats.norm(dim=-1, keepdim=True)
         all_image_features.append(feats.cpu())
 
-    image_features = torch.cat(all_image_features)          # [N x D]
+    image_features = torch.cat(all_image_features)          # [N x D] on CPU
 
     # --- Weighted text prompt scores ---
-    # raw cosine sims [N x num_prompts]
-    raw_sims = (image_features @ text_features.to(device).T / TEMPERATURE)
-    prompt_sims = torch.sigmoid(raw_sims).cpu().numpy()     # keep sigmoid per user
+    # both on CPU for aggregation (text_features already .cpu() from encode step)
+    raw_sims = (image_features @ text_features.T / TEMPERATURE)
+    prompt_sims = torch.sigmoid(raw_sims).numpy()           # keep sigmoid per user
 
     # Apply per-prompt weights when available, else uniform mean
     weights = prompt_weights if prompt_weights is not None \
@@ -446,9 +446,9 @@ def run_inference(image_paths, prototypes=None, prompt_weights=None, proto_weigh
         return text_class_scores
 
     # --- Prototype scores ---
-    proto_tensor = torch.tensor(prototypes, dtype=torch.float32).to(device)  # [C x D]
+    proto_tensor = torch.tensor(prototypes, dtype=torch.float32)  # [C x D] keep on CPU
     proto_raw    = (image_features @ proto_tensor.T / TEMPERATURE)
-    proto_scores = torch.sigmoid(proto_raw).cpu().numpy()          # [N x C]
+    proto_scores = torch.sigmoid(proto_raw).numpy()                # [N x C]
 
     # --- Blend ---
     return proto_weight * proto_scores + (1 - proto_weight) * text_class_scores
