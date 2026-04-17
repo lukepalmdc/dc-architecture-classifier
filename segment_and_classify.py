@@ -61,7 +61,7 @@ def parse_args():
                    help="Experiment name under outputs/ (default: best by accuracy)")
     p.add_argument("--top",         type=int,   default=3)
     p.add_argument("--min-conf",    type=float, default=0.4,
-                   help="Reject crops below this confidence (default 0.4)")
+                   help="Reject CLIP crops below this confidence (default 0.4)")
     p.add_argument("--min-area",    type=float, default=0.06,
                    help="Ignore building regions smaller than this fraction of image (default 0.06)")
     p.add_argument("--temperature", type=float, default=0.3)
@@ -147,19 +147,34 @@ def encode_text(style_prompts, class_names, clip_model, device):
 # SEGMENTATION
 # =============================================================================
 
-def segment_buildings(pil_image, seg_model, seg_processor, device, min_area_frac):
-    """Return list of {"bbox", "area_fraction", "crop"} dicts, sorted largest first."""
-    W, H = pil_image.size
-    total_px = W * H
+def iou(a, b):
+    """IoU between two [x1,y1,x2,y2] boxes."""
+    ix1 = max(a[0], b[0]);  iy1 = max(a[1], b[1])
+    ix2 = min(a[2], b[2]);  iy2 = min(a[3], b[3])
+    inter = max(0, ix2 - ix1) * max(0, iy2 - iy1)
+    if inter == 0:
+        return 0.0
+    area_a = (a[2]-a[0]) * (a[3]-a[1])
+    area_b = (b[2]-b[0]) * (b[3]-b[1])
+    return inter / (area_a + area_b - inter)
 
-    inputs = seg_processor(images=pil_image, return_tensors="pt").to(device)
+
+def _segment_strip(strip, x_offset, full_W, full_H,
+                   seg_model, seg_processor, device, min_area_frac, seg_conf):
+    """Run SegFormer on one vertical strip, return crops with bbox in full-image coords."""
+    sW, sH = strip.size
+    total_px = full_W * full_H
+
+    inputs = seg_processor(images=strip, return_tensors="pt").to(device)
     with torch.no_grad():
-        logits = seg_model(**inputs).logits          # [1 x C x h x w]
+        logits = seg_model(**inputs).logits
 
-    upsampled = F.interpolate(logits, size=(H, W), mode="bilinear", align_corners=False)
-    seg_map   = upsampled.argmax(dim=1).squeeze(0).cpu().numpy()
+    upsampled = F.interpolate(logits, size=(sH, sW), mode="bilinear", align_corners=False)
+    probs     = F.softmax(upsampled, dim=1)
+    seg_map   = probs.argmax(dim=1).squeeze(0).cpu().numpy()
+    max_prob  = probs.max(dim=1).values.squeeze(0).cpu().numpy()
 
-    building_mask = np.isin(seg_map, list(BUILDING_IDS))
+    building_mask = np.isin(seg_map, list(BUILDING_IDS)) & (max_prob >= seg_conf)
     if not building_mask.any():
         return []
 
@@ -175,21 +190,60 @@ def segment_buildings(pil_image, seg_model, seg_processor, device, min_area_frac
         rows = np.where(comp.any(axis=1))[0]
         cols = np.where(comp.any(axis=0))[0]
         y1, y2 = int(rows[0]), int(rows[-1])
-        x1, x2 = int(cols[0]), int(cols[-1])
+        x1, x2 = int(cols[0]) + x_offset, int(cols[-1]) + x_offset  # full-image coords
 
         pad_y = max(1, int((y2 - y1) * BBOX_PAD_FRAC))
         pad_x = max(1, int((x2 - x1) * BBOX_PAD_FRAC))
-        y1 = max(0, y1 - pad_y);  y2 = min(H, y2 + pad_y)
-        x1 = max(0, x1 - pad_x);  x2 = min(W, x2 + pad_x)
+        y1 = max(0, y1 - pad_y);       y2 = min(full_H, y2 + pad_y)
+        x1 = max(0, x1 - pad_x);       x2 = min(full_W, x2 + pad_x)
 
         crops.append({
             "bbox":          [x1, y1, x2, y2],
             "area_fraction": float(area_frac),
-            "crop":          pil_image.crop((x1, y1, x2, y2)),
         })
 
-    crops.sort(key=lambda c: -c["area_fraction"])
     return crops
+
+
+def segment_buildings(pil_image, seg_model, seg_processor, device, min_area_frac, seg_conf=0.5):
+    """
+    Tile image into 3 overlapping vertical strips (left / center / right),
+    run SegFormer on each, map detections back to full-image coordinates,
+    deduplicate overlapping boxes by IoU, return crops sorted largest first.
+
+    Tiling reduces per-strip distortion and ensures buildings on either side
+    of the road are processed in a less distorted sub-image.
+    """
+    W, H = pil_image.size
+
+    # Three strips: left 60%, center 60% (offset 20%), right 60% (offset 40%)
+    strip_w   = int(W * 0.6)
+    offsets   = [0, int(W * 0.2), int(W * 0.4)]
+    all_crops = []
+
+    for x0 in offsets:
+        x1 = min(x0 + strip_w, W)
+        strip  = pil_image.crop((x0, 0, x1, H))
+        all_crops += _segment_strip(strip, x0, W, H,
+                                    seg_model, seg_processor, device,
+                                    min_area_frac, seg_conf)
+
+    if not all_crops:
+        return []
+
+    # Deduplicate: greedily keep largest, suppress anything with IoU > 0.4
+    all_crops.sort(key=lambda c: -c["area_fraction"])
+    kept = []
+    for cand in all_crops:
+        if all(iou(cand["bbox"], k["bbox"]) < 0.4 for k in kept):
+            kept.append(cand)
+
+    # Attach actual PIL crops now that dedup is done
+    for c in kept:
+        x1, y1, x2, y2 = c["bbox"]
+        c["crop"] = pil_image.crop((x1, y1, x2, y2))
+
+    return kept
 
 
 # =============================================================================
