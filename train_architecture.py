@@ -49,13 +49,17 @@ def parse_args():
     p.add_argument("--out-dir",        type=str, default="outputs")
     p.add_argument("--name",           type=str, default="default",
                    help="Experiment name (used as output subdirectory)")
+    p.add_argument("--batch-size",     type=int, default=512,
+                   help="Images per GPU batch (default 512)")
+    p.add_argument("--num-threads",    type=int, default=8,
+                   help="CPU threads for image loading (default 8)")
     return p.parse_args()
 
 args = parse_args()
 
 DATA_DIR    = "data/styles"
-BATCH_SIZE  = 32
-NUM_THREADS = 8
+BATCH_SIZE  = args.batch_size
+NUM_THREADS = args.num_threads
 TEST_SPLIT  = 0.2
 TOP_K       = 3
 SEED        = 42
