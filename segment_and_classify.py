@@ -426,9 +426,8 @@ def main():
 
     if device == "cuda":
         try:
-            seg_model  = torch.compile(seg_model,  mode="reduce-overhead")
             clip_model = torch.compile(clip_model, mode="reduce-overhead")
-            print("torch.compile enabled")
+            print("torch.compile enabled for CLIP")
         except Exception:
             print("torch.compile not available, continuing without")
 
