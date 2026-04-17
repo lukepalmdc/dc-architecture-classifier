@@ -230,7 +230,9 @@ def segment_batch(images, seg_model, seg_processor, device, min_area_frac):
         batch_pils = strip_pils[i:i + SEG_BATCH]
         batch_meta = strip_meta[i:i + SEG_BATCH]
 
-        inputs = seg_processor(images=batch_pils, return_tensors="pt").to(device)
+        inputs = seg_processor(images=batch_pils, return_tensors="pt")
+        inputs = {k: v.to(device=device, dtype=torch.float16 if v.is_floating_point() else v.dtype)
+                  for k, v in inputs.items()}
         with torch.no_grad():
             logits = seg_model(**inputs).logits       # [B x C x h x w]
 
