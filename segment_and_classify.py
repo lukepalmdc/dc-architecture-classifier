@@ -5,16 +5,17 @@ Segment buildings from street-level images using SegFormer (ADE20K),
 then classify each building crop with the trained CLIP architecture classifier.
 
 Usage:
-    python segment_and_classify.py image.jpg
-    python segment_and_classify.py data/images/ --exp build_prompts_full_temp_03
-    python segment_and_classify.py image.jpg --top 3 --save-viz --out results.json
+    python segment_and_classify.py data/images/ --sample 50 --save-viz
+    python segment_and_classify.py --full-run --out-dir dc_results
 """
 
 import argparse
 import json
+import jsonlines
 import sqlite3
-from pathlib import Path
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 
 import numpy as np
 import torch
@@ -26,9 +27,13 @@ from transformers import SegformerImageProcessor, SegformerForSemanticSegmentati
 from scipy import ndimage
 
 # ── ADE20K building class IDs (0-indexed) ───────────────────────────────────
-# 1=building/edifice  25=house  48=skyscraper  84=tower
-BUILDING_IDS = {1, 25, 48, 84}
+BUILDING_IDS  = {1, 25, 48, 84}   # building/edifice, house, skyscraper, tower
 BBOX_PAD_FRAC = 0.05
+SEG_BATCH     = 12    # strips per SegFormer forward pass
+CLIP_BATCH    = 64    # crops per CLIP forward pass
+IMAGE_BATCH   = 4     # images loaded and processed together
+PREFETCH      = 8     # images prefetched while GPU works
+SEG_CONF      = 0.5   # per-pixel SegFormer confidence threshold
 
 LABEL_DISPLAY = {
     "art_deco":           "Art Deco",
@@ -58,29 +63,21 @@ COLORS = ["#FF6B6B", "#4ECDC4", "#45B7D1", "#96CEB4", "#FFEAA7", "#DDA0DD"]
 
 def parse_args():
     p = argparse.ArgumentParser()
-    p.add_argument("input",         nargs="?", default=None,
-                   help="Image file or directory (omit to run full DC pipeline from image_status.db)")
-    p.add_argument("--full-run",    action="store_true",
+    p.add_argument("input",          nargs="?", default=None,
+                   help="Image file or directory (omit with --full-run)")
+    p.add_argument("--full-run",     action="store_true",
                    help="Run on all downloaded buildings from data/image_status.db")
-    p.add_argument("--db",          default="data/image_status.db",
-                   help="SQLite DB from fetch_images.py (default: data/image_status.db)")
-    p.add_argument("--exp",         default=None,
+    p.add_argument("--db",           default="data/image_status.db")
+    p.add_argument("--exp",          default=None,
                    help="Experiment name under outputs/ (default: best by accuracy)")
-    p.add_argument("--top",         type=int,   default=3)
-    p.add_argument("--min-conf",    type=float, default=0.7,
-                   help="Reject CLIP crops below this confidence (default 0.7)")
-    p.add_argument("--min-area",    type=float, default=0.06,
-                   help="Ignore building regions smaller than this fraction of image (default 0.06)")
-    p.add_argument("--temperature", type=float, default=0.3)
-    p.add_argument("--out-dir",     default="dctest",
-                   help="Directory for viz images and results JSON (default: dctest)")
-    p.add_argument("--out",         default=None,
-                   help="Results JSON filename (default: <out-dir>/results.json)")
-    p.add_argument("--save-viz",    action="store_true",
-                   help="Save annotated images to out-dir")
-    p.add_argument("--sample",      type=int, default=None,
-                   help="Randomly sample N images for testing (default: all)")
-    p.add_argument("--seed",        type=int, default=42)
+    p.add_argument("--top",          type=int,   default=3)
+    p.add_argument("--min-conf",     type=float, default=0.7)
+    p.add_argument("--min-area",     type=float, default=0.06)
+    p.add_argument("--temperature",  type=float, default=0.3)
+    p.add_argument("--out-dir",      default="dctest")
+    p.add_argument("--save-viz",     action="store_true")
+    p.add_argument("--sample",       type=int,   default=None)
+    p.add_argument("--seed",         type=int,   default=42)
     return p.parse_args()
 
 
@@ -104,17 +101,14 @@ def find_best_exp():
 
 def load_experiment(exp_name):
     exp_dir = Path("outputs") / exp_name
-
     with open(exp_dir / "class_names.json") as f:
         class_names = json.load(f)
 
-    # Load prompts saved by train_architecture (guarantees alignment with prompt_weights)
     prompts_path = exp_dir / "prompts.json"
     if prompts_path.exists():
         with open(prompts_path) as f:
             style_prompts = json.load(f)
     else:
-        # Fallback: rebuild prompts from class names
         style_prompts = {
             cls: [
                 f"a {LABEL_DISPLAY.get(cls, cls.replace('_',' ').title())} building",
@@ -127,38 +121,30 @@ def load_experiment(exp_name):
 
     prototypes     = np.load(exp_dir / "prototypes.npy")     if (exp_dir / "prototypes.npy").exists()     else None
     prompt_weights = np.load(exp_dir / "prompt_weights.npy") if (exp_dir / "prompt_weights.npy").exists() else None
-
     return class_names, style_prompts, prototypes, prompt_weights
 
 
 def encode_text(style_prompts, class_names, clip_model, device):
-    """Encode prompts with CLIP. Returns (text_features, class_indices)."""
     all_prompts, class_indices = [], []
     cls_to_idx = {cls: i for i, cls in enumerate(class_names)}
-
     for cls, prompts in style_prompts.items():
         if cls not in cls_to_idx:
             continue
         for prompt in prompts:
             all_prompts.append(prompt)
             class_indices.append(cls_to_idx[cls])
-
     tokens = clip.tokenize(all_prompts).to(device)
     with torch.no_grad():
-        text_features = clip_model.encode_text(tokens)
-        text_features = text_features / text_features.norm(dim=-1, keepdim=True)
-    return text_features, class_indices
+        tf = clip_model.encode_text(tokens)
+        tf = tf / tf.norm(dim=-1, keepdim=True)
+    return tf, class_indices
 
 
 # =============================================================================
-# FULL-RUN DB HELPERS
+# DB / CHECKPOINT
 # =============================================================================
 
 def load_images_from_db(db_path):
-    """
-    Load all successfully downloaded images from image_status.db.
-    Returns list of {"objectid", "image_path", "residential_type", "address"}.
-    """
     conn = sqlite3.connect(db_path)
     rows = conn.execute(
         "SELECT objectid, image_path, residential_type, address "
@@ -166,207 +152,196 @@ def load_images_from_db(db_path):
     ).fetchall()
     conn.close()
     return [
-        {"objectid": r[0], "image_path": r[1],
-         "residential_type": r[2], "address": r[3]}
+        {"objectid": r[0], "image_path": r[1], "residential_type": r[2], "address": r[3]}
         for r in rows if Path(r[1]).exists()
     ]
 
 
-def load_checkpoint(checkpoint_path):
-    """Return set of already-processed objectids."""
-    if not Path(checkpoint_path).exists():
+def load_checkpoint(path):
+    if not Path(path).exists():
         return set()
-    with open(checkpoint_path) as f:
+    with open(path) as f:
         return set(json.load(f))
 
 
-def save_checkpoint(checkpoint_path, done_ids):
-    with open(checkpoint_path, "w") as f:
+def save_checkpoint(path, done_ids):
+    with open(path, "w") as f:
         json.dump(list(done_ids), f)
 
 
-def aggregate_building_predictions(all_results):
-    """
-    Group per-image results by objectid, aggregate crop predictions.
-    For each building, average confidence scores across all images and crops,
-    return top label + confidence.
-    """
-    by_building = defaultdict(list)
-    for r in all_results:
-        oid = r.get("objectid")
-        if oid is None:
-            continue
-        for b in r.get("buildings", []):
-            if "predictions" in b and "all_scores" in b:
-                by_building[oid].append(b["all_scores"])
-
-    aggregated = {}
-    for oid, score_dicts in by_building.items():
-        # Average all_scores across all crops for this building
-        avg = defaultdict(float)
-        for sd in score_dicts:
-            for lbl, val in sd.items():
-                avg[lbl] += val / len(score_dicts)
-        top_label = max(avg, key=avg.get)
-        aggregated[oid] = {
-            "label":      top_label,
-            "confidence": round(avg[top_label], 4),
-            "other_p":    round(1.0 - avg[top_label], 4),
-            "all_scores": {k: round(v, 4) for k, v in sorted(avg.items(), key=lambda x: -x[1])},
-            "n_crops":    len(score_dicts),
-        }
-    return aggregated
-
-
 # =============================================================================
-# SEGMENTATION
+# SEGMENTATION  (batched across strips)
 # =============================================================================
 
 def iou(a, b):
-    """IoU between two [x1,y1,x2,y2] boxes."""
     ix1 = max(a[0], b[0]);  iy1 = max(a[1], b[1])
     ix2 = min(a[2], b[2]);  iy2 = min(a[3], b[3])
     inter = max(0, ix2 - ix1) * max(0, iy2 - iy1)
     if inter == 0:
         return 0.0
-    area_a = (a[2]-a[0]) * (a[3]-a[1])
-    area_b = (b[2]-b[0]) * (b[3]-b[1])
-    return inter / (area_a + area_b - inter)
+    return inter / ((a[2]-a[0])*(a[3]-a[1]) + (b[2]-b[0])*(b[3]-b[1]) - inter)
 
 
-def _segment_strip(strip, x_offset, full_W, full_H,
-                   seg_model, seg_processor, device, min_area_frac, seg_conf):
-    """Run SegFormer on one vertical strip, return crops with bbox in full-image coords."""
-    sW, sH = strip.size
-    total_px = full_W * full_H
-
-    inputs = seg_processor(images=strip, return_tensors="pt").to(device)
-    with torch.no_grad():
-        logits = seg_model(**inputs).logits
-
-    upsampled = F.interpolate(logits, size=(sH, sW), mode="bilinear", align_corners=False)
-    probs     = F.softmax(upsampled, dim=1)
-    seg_map   = probs.argmax(dim=1).squeeze(0).cpu().numpy()
-    max_prob  = probs.max(dim=1).values.squeeze(0).cpu().numpy()
-
-    building_mask = np.isin(seg_map, list(BUILDING_IDS)) & (max_prob >= seg_conf)
-    if not building_mask.any():
-        return []
-
+def _extract_crops_from_mask(building_mask, x_offset, full_W, full_H, min_area_frac):
+    total_px  = full_W * full_H
     labeled, n = ndimage.label(building_mask)
     crops = []
-
     for comp_id in range(1, n + 1):
         comp      = labeled == comp_id
         area_frac = comp.sum() / total_px
         if area_frac < min_area_frac:
             continue
-
         rows = np.where(comp.any(axis=1))[0]
         cols = np.where(comp.any(axis=0))[0]
-        y1, y2 = int(rows[0]), int(rows[-1])
-        x1, x2 = int(cols[0]) + x_offset, int(cols[-1]) + x_offset  # full-image coords
-
+        y1, y2 = int(rows[0]),  int(rows[-1])
+        x1, x2 = int(cols[0]) + x_offset, int(cols[-1]) + x_offset
         pad_y = max(1, int((y2 - y1) * BBOX_PAD_FRAC))
         pad_x = max(1, int((x2 - x1) * BBOX_PAD_FRAC))
-        y1 = max(0, y1 - pad_y);       y2 = min(full_H, y2 + pad_y)
-        x1 = max(0, x1 - pad_x);       x2 = min(full_W, x2 + pad_x)
-
         crops.append({
-            "bbox":          [x1, y1, x2, y2],
+            "bbox":          [max(0,x1-pad_x), max(0,y1-pad_y),
+                               min(full_W,x2+pad_x), min(full_H,y2+pad_y)],
             "area_fraction": float(area_frac),
         })
-
     return crops
 
 
-def segment_buildings(pil_image, seg_model, seg_processor, device, min_area_frac, seg_conf=0.5):
+def segment_batch(images, seg_model, seg_processor, device, min_area_frac):
     """
-    Tile image into 3 overlapping vertical strips (left / center / right),
-    run SegFormer on each, map detections back to full-image coordinates,
-    deduplicate overlapping boxes by IoU, return crops sorted largest first.
-
-    Tiling reduces per-strip distortion and ensures buildings on either side
-    of the road are processed in a less distorted sub-image.
+    Run SegFormer on a batch of PIL images using 3-strip tiling.
+    Returns per-image list of crop dicts (bbox, area_fraction).
+    All SegFormer forward passes are batched together.
     """
-    W, H = pil_image.size
+    # Build strip list: (img_idx, x_offset, full_W, full_H, strip_W, strip_H, strip_pil)
+    strip_meta, strip_pils = [], []
+    for img_idx, pil in enumerate(images):
+        W, H    = pil.size
+        sw      = int(W * 0.6)
+        for x0 in [0, int(W * 0.2), int(W * 0.4)]:
+            x1 = min(x0 + sw, W)
+            s  = pil.crop((x0, 0, x1, H))
+            strip_meta.append((img_idx, x0, W, H, x1 - x0, H))
+            strip_pils.append(s)
 
-    # Three strips: left 60%, center 60% (offset 20%), right 60% (offset 40%)
-    strip_w   = int(W * 0.6)
-    offsets   = [0, int(W * 0.2), int(W * 0.4)]
-    all_crops = []
+    per_image = [[] for _ in images]
 
-    for x0 in offsets:
-        x1 = min(x0 + strip_w, W)
-        strip  = pil_image.crop((x0, 0, x1, H))
-        all_crops += _segment_strip(strip, x0, W, H,
-                                    seg_model, seg_processor, device,
-                                    min_area_frac, seg_conf)
+    # Run SegFormer in SEG_BATCH-sized chunks
+    for i in range(0, len(strip_pils), SEG_BATCH):
+        batch_pils = strip_pils[i:i + SEG_BATCH]
+        batch_meta = strip_meta[i:i + SEG_BATCH]
 
-    if not all_crops:
-        return []
+        inputs = seg_processor(images=batch_pils, return_tensors="pt",
+                               padding=True).to(device)
+        with torch.no_grad():
+            logits = seg_model(**inputs).logits       # [B x C x h x w]
 
-    # Deduplicate: greedily keep largest, suppress anything with IoU > 0.4
-    all_crops.sort(key=lambda c: -c["area_fraction"])
-    kept = []
-    for cand in all_crops:
-        if all(iou(cand["bbox"], k["bbox"]) < 0.4 for k in kept):
-            kept.append(cand)
+        for j, (img_idx, x_off, full_W, full_H, sW, sH) in enumerate(batch_meta):
+            up       = F.interpolate(logits[j:j+1], size=(sH, sW),
+                                     mode="bilinear", align_corners=False)
+            probs    = F.softmax(up, dim=1)
+            seg_map  = probs.argmax(dim=1).squeeze(0).cpu().numpy()
+            max_prob = probs.max(dim=1).values.squeeze(0).cpu().numpy()
+            mask     = np.isin(seg_map, list(BUILDING_IDS)) & (max_prob >= SEG_CONF)
+            if mask.any():
+                per_image[img_idx].extend(
+                    _extract_crops_from_mask(mask, x_off, full_W, full_H, min_area_frac)
+                )
 
-    # Attach actual PIL crops now that dedup is done
-    for c in kept:
-        x1, y1, x2, y2 = c["bbox"]
-        c["crop"] = pil_image.crop((x1, y1, x2, y2))
+    # Dedup per image, attach PIL crops
+    results = []
+    for img_idx, pil in enumerate(images):
+        crops = per_image[img_idx]
+        if not crops:
+            results.append([])
+            continue
+        crops.sort(key=lambda c: -c["area_fraction"])
+        kept = []
+        for cand in crops:
+            if all(iou(cand["bbox"], k["bbox"]) < 0.4 for k in kept):
+                kept.append(cand)
+        for c in kept:
+            x1, y1, x2, y2 = c["bbox"]
+            c["crop"] = pil.crop((x1, y1, x2, y2))
+        results.append(kept)
 
-    return kept
+    return results
 
 
 # =============================================================================
-# CLASSIFICATION
+# CLASSIFICATION  (batched across all crops from a batch of images)
 # =============================================================================
 
-def classify_crop(pil_crop, class_names, prototypes, text_features,
-                  class_indices, prompt_weights, temperature, top_k,
-                  clip_model, clip_preprocess, device):
-    img_t = clip_preprocess(pil_crop).unsqueeze(0).to(device)
-
-    with torch.no_grad(), torch.amp.autocast("cuda", enabled=device == "cuda"):
-        feats = clip_model.encode_image(img_t)
-        feats = feats / feats.norm(dim=-1, keepdim=True)
-    feats = feats.to(dtype=text_features.dtype)
-
+def classify_batch(all_crops, class_names, prototypes, text_features,
+                   class_indices, prompt_weights, temperature, top_k,
+                   clip_model, clip_preprocess, device):
+    """
+    Classify all crops from a batch of images in one CLIP forward pass.
+    Returns per-image list of prediction dicts.
+    """
     num_classes = len(class_names)
-    raw         = feats @ text_features.T / temperature
-    prompt_sims = torch.sigmoid(raw)
 
-    w   = (torch.tensor(prompt_weights, dtype=feats.dtype, device=device)
-           if prompt_weights is not None
-           else torch.ones(len(class_indices), dtype=feats.dtype, device=device))
-    idx = torch.tensor(class_indices, device=device)
+    # Flatten crops
+    flat = []   # (img_idx, crop_idx, pil_crop)
+    for i, crops in enumerate(all_crops):
+        for j, c in enumerate(crops):
+            if c.get("crop") is not None:
+                flat.append((i, j, c["crop"]))
 
-    weighted    = prompt_sims * w.unsqueeze(0)
-    text_scores = torch.zeros(1, num_classes, dtype=feats.dtype, device=device)
-    text_scores.scatter_add_(1, idx.unsqueeze(0).expand(1, -1), weighted)
-    weight_sums = torch.zeros(num_classes, dtype=feats.dtype, device=device)
-    weight_sums.scatter_add_(0, idx, w)
-    text_scores /= weight_sums.clamp(min=1e-8).unsqueeze(0)
+    scores_map = {}   # (img_idx, crop_idx) -> scores_np [num_classes]
 
-    if prototypes is not None:
-        proto_t      = torch.tensor(prototypes, dtype=feats.dtype, device=device)
-        proto_scores = torch.sigmoid(feats @ proto_t.T / temperature)
-        scores       = 0.5 * proto_scores + 0.5 * text_scores
-    else:
-        scores = text_scores
+    for b in range(0, len(flat), CLIP_BATCH):
+        chunk = flat[b:b + CLIP_BATCH]
+        imgs  = torch.stack([clip_preprocess(x[2]) for x in chunk]).to(device)
 
-    scores_np  = scores.squeeze(0).cpu().float().numpy()
-    top_idx    = np.argsort(-scores_np)[:top_k]
-    top_conf   = float(scores_np[top_idx[0]]) if len(top_idx) else 0.0
+        with torch.no_grad(), torch.amp.autocast("cuda", enabled=device == "cuda"):
+            feats = clip_model.encode_image(imgs)
+            feats = feats / feats.norm(dim=-1, keepdim=True)
+        feats = feats.to(dtype=text_features.dtype)   # match fp16
 
-    return {
-        "top":        [{"label": class_names[i], "confidence": float(scores_np[i])} for i in top_idx],
-        "all_scores": {class_names[i]: round(float(scores_np[i]), 4) for i in range(len(class_names))},
-        "other_p":    round(1.0 - top_conf, 4),   # prob mass not explained by top prediction
-    }
+        # Weighted scatter-add on GPU  [B x num_classes]
+        raw  = feats @ text_features.T / temperature
+        sims = torch.sigmoid(raw)
+
+        w    = (torch.tensor(prompt_weights, dtype=feats.dtype, device=device)
+                if prompt_weights is not None
+                else torch.ones(len(class_indices), dtype=feats.dtype, device=device))
+        idx  = torch.tensor(class_indices, device=device)
+
+        weighted     = sims * w.unsqueeze(0)
+        text_scores  = torch.zeros(len(chunk), num_classes, dtype=feats.dtype, device=device)
+        text_scores.scatter_add_(1, idx.unsqueeze(0).expand(len(chunk), -1), weighted)
+        weight_sums  = torch.zeros(num_classes, dtype=feats.dtype, device=device)
+        weight_sums.scatter_add_(0, idx, w)
+        text_scores /= weight_sums.clamp(min=1e-8).unsqueeze(0)
+
+        if prototypes is not None:
+            proto_t      = torch.tensor(prototypes, dtype=feats.dtype, device=device)
+            proto_scores = torch.sigmoid(feats @ proto_t.T / temperature)
+            scores       = (0.5 * proto_scores + 0.5 * text_scores).cpu().float().numpy()
+        else:
+            scores = text_scores.cpu().float().numpy()
+
+        for k, (i, j, _) in enumerate(chunk):
+            scores_map[(i, j)] = scores[k]
+
+    # Rebuild per-image results
+    per_image = [[] for _ in all_crops]
+    for i, crops in enumerate(all_crops):
+        for j, c in enumerate(crops):
+            s = scores_map.get((i, j))
+            if s is None:
+                continue
+            top_idx  = np.argsort(-s)[:top_k]
+            top_conf = float(s[top_idx[0]])
+            per_image[i].append({
+                "bbox":         c["bbox"],
+                "area_fraction":c["area_fraction"],
+                "top":          [{"label": class_names[k], "confidence": round(float(s[k]),4)}
+                                 for k in top_idx],
+                "all_scores":   {class_names[k]: round(float(s[k]),4) for k in range(num_classes)},
+                "other_p":      round(1.0 - top_conf, 4),
+            })
+
+    return per_image
 
 
 # =============================================================================
@@ -377,161 +352,219 @@ def save_viz(pil_image, buildings, out_path):
     viz  = pil_image.copy()
     draw = ImageDraw.Draw(viz)
     for i, b in enumerate(buildings):
-        if "predictions" not in b:
+        if "top" not in b:
             continue
         x1, y1, x2, y2 = b["bbox"]
         color = COLORS[i % len(COLORS)]
         draw.rectangle([x1, y1, x2, y2], outline=color, width=3)
-        top = b["predictions"][0]
-        draw.text((x1 + 4, y1 + 4), f"{top['label']} {top['confidence']:.2f}  other={b.get('other_p',0):.2f}", fill=color)
+        top = b["top"][0]
+        draw.text((x1+4, y1+4),
+                  f"{top['label']} {top['confidence']:.2f}  other={b['other_p']:.2f}",
+                  fill=color)
     viz.save(out_path)
+
+
+# =============================================================================
+# AGGREGATION
+# =============================================================================
+
+def aggregate_building_predictions(jsonl_path):
+    by_building = defaultdict(list)
+    with jsonlines.open(jsonl_path) as reader:
+        for r in reader:
+            oid = r.get("objectid")
+            if oid is None:
+                continue
+            for b in r.get("buildings", []):
+                if "all_scores" in b:
+                    by_building[oid].append(b["all_scores"])
+
+    aggregated = {}
+    for oid, score_dicts in by_building.items():
+        avg = defaultdict(float)
+        for sd in score_dicts:
+            for lbl, val in sd.items():
+                avg[lbl] += val / len(score_dicts)
+        top_label = max(avg, key=avg.get)
+        aggregated[oid] = {
+            "label":      top_label,
+            "confidence": round(avg[top_label], 4),
+            "other_p":    round(1.0 - avg[top_label], 4),
+            "all_scores": {k: round(v,4) for k,v in sorted(avg.items(), key=lambda x:-x[1])},
+            "n_crops":    len(score_dicts),
+        }
+    return aggregated
 
 
 # =============================================================================
 # MAIN
 # =============================================================================
 
-def main():
-    args = parse_args()
+def load_image(path):
+    try:
+        return Image.open(path).convert("RGB")
+    except Exception:
+        return None
 
+
+def main():
+    args   = parse_args()
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"Device: {device}")
 
-    # ── Load models ──────────────────────────────────────────────────────────
-    print("Loading SegFormer (ADE20K b2)...")
-    seg_processor = SegformerImageProcessor.from_pretrained("nvidia/segformer-b2-finetuned-ade-512-512")
-    seg_model     = SegformerForSemanticSegmentation.from_pretrained(
-        "nvidia/segformer-b2-finetuned-ade-512-512"
-    ).to(device).eval()
+    # ── Models ───────────────────────────────────────────────────────────────
+    print("Loading SegFormer (ADE20K b0 — optimised for throughput)...")
+    seg_processor = SegformerImageProcessor.from_pretrained(
+        "nvidia/segformer-b0-finetuned-ade-512-512")
+    seg_model = SegformerForSemanticSegmentation.from_pretrained(
+        "nvidia/segformer-b0-finetuned-ade-512-512"
+    ).to(device).eval().half()   # fp16
 
     print("Loading CLIP ViT-B/32...")
     clip_model, clip_preprocess = clip.load("ViT-B/32", device=device)
     clip_model.eval()
 
-    # ── Load experiment ───────────────────────────────────────────────────────
+    if device == "cuda":
+        try:
+            seg_model  = torch.compile(seg_model,  mode="reduce-overhead")
+            clip_model = torch.compile(clip_model, mode="reduce-overhead")
+            print("torch.compile enabled")
+        except Exception:
+            print("torch.compile not available, continuing without")
+
+    # ── Experiment ───────────────────────────────────────────────────────────
     exp_name = args.exp or find_best_exp()
     if not exp_name:
-        print("No experiment outputs found. Run train_architecture.py first.")
+        print("No experiment outputs found.")
         return
-    print(f"Using experiment: {exp_name}")
+    print(f"Experiment: {exp_name}")
 
     class_names, style_prompts, prototypes, prompt_weights = load_experiment(exp_name)
-    print(f"Classes ({len(class_names)}): {', '.join(class_names)}")
-
     text_features, class_indices = encode_text(style_prompts, class_names, clip_model, device)
 
     # ── Gather images ─────────────────────────────────────────────────────────
-    out_dir = Path(args.out_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
-    out_json       = Path(args.out) if args.out else out_dir / "results.json"
+    out_dir         = Path(args.out_dir);  out_dir.mkdir(parents=True, exist_ok=True)
     checkpoint_path = out_dir / "checkpoint.json"
+    results_path    = out_dir / "results.jsonl"
+    full_run        = args.full_run or not args.input
 
-    if args.full_run or not args.input:
-        db_rows    = load_images_from_db(args.db)
-        done_ids   = load_checkpoint(checkpoint_path)
-        pending    = [r for r in db_rows if str(r["objectid"]) not in done_ids]
-        image_metas = pending
-        print(f"Full run: {len(db_rows)} buildings in DB, "
-              f"{len(done_ids)} already done, {len(pending)} remaining")
-        full_run = True
+    if full_run:
+        db_rows   = load_images_from_db(args.db)
+        done_ids  = load_checkpoint(checkpoint_path)
+        metas     = [r for r in db_rows if str(r["objectid"]) not in done_ids]
+        print(f"DB: {len(db_rows)} buildings  |  done: {len(done_ids)}  |  remaining: {len(metas)}")
     else:
         input_path = Path(args.input)
-        image_paths = (
-            sorted(input_path.glob("*.jpg")) + sorted(input_path.glob("*.png"))
-            if input_path.is_dir() else [input_path]
-        )
-        if args.sample and args.sample < len(image_paths):
-            rng = np.random.default_rng(args.seed)
-            image_paths = list(rng.choice(image_paths, size=args.sample, replace=False))
-            print(f"Sampled {args.sample} images (seed={args.seed})")
-        image_metas = [{"objectid": None, "image_path": str(p)} for p in image_paths]
-        full_run = False
+        paths = (sorted(input_path.glob("*.jpg")) + sorted(input_path.glob("*.png"))
+                 if input_path.is_dir() else [input_path])
+        if args.sample and args.sample < len(paths):
+            rng   = np.random.default_rng(args.seed)
+            paths = list(rng.choice(paths, size=args.sample, replace=False))
+            print(f"Sampled {args.sample} images")
+        metas = [{"objectid": None, "image_path": str(p)} for p in paths]
 
-    print(f"Processing {len(image_metas)} image(s)...\n")
+    print(f"Processing {len(metas)} images  |  seg_batch={SEG_BATCH}  clip_batch={CLIP_BATCH}\n")
 
-    all_results = []
-    done_ids    = load_checkpoint(checkpoint_path) if full_run else set()
+    done_ids = load_checkpoint(checkpoint_path) if full_run else set()
+    n_buildings_found = 0
 
-    for meta in tqdm(image_metas, unit="img"):
-        img_path = Path(meta["image_path"])
-        objectid = meta.get("objectid")
+    # Open JSONL in append mode so we resume without losing prior results
+    jsonl_file = open(results_path, "a")
 
-        try:
-            pil_image = Image.open(img_path).convert("RGB")
-        except Exception as e:
-            all_results.append({"image": str(img_path), "objectid": objectid, "error": str(e)})
-            continue
+    with ThreadPoolExecutor(max_workers=PREFETCH) as loader:
+        # Pre-submit first IMAGE_BATCH
+        batches     = [metas[i:i+IMAGE_BATCH] for i in range(0, len(metas), IMAGE_BATCH)]
+        prefetch_q  = []
 
-        crops = segment_buildings(pil_image, seg_model, seg_processor, device, args.min_area)
+        def submit_batch(batch):
+            return [(m, loader.submit(load_image, m["image_path"])) for m in batch]
 
-        if not crops:
-            all_results.append({"image": str(img_path), "objectid": objectid,
-                                 "filtered": "no_buildings", "buildings": []})
-            if full_run:
-                done_ids.add(str(objectid))
-            continue
+        if batches:
+            prefetch_q.append(submit_batch(batches[0]))
 
-        buildings = []
-        for crop_info in crops:
-            preds  = classify_crop(
-                crop_info["crop"], class_names, prototypes,
-                text_features, class_indices, prompt_weights,
-                args.temperature, args.top,
+        for batch_idx in tqdm(range(len(batches)), unit="batch",
+                               desc=f"batches of {IMAGE_BATCH}"):
+            # Pre-submit next batch while GPU works
+            if batch_idx + 1 < len(batches):
+                prefetch_q.append(submit_batch(batches[batch_idx + 1]))
+
+            current = prefetch_q.pop(0)
+            pil_images, valid_metas = [], []
+            for meta, fut in current:
+                img = fut.result()
+                if img is not None:
+                    pil_images.append(img)
+                    valid_metas.append(meta)
+
+            if not pil_images:
+                continue
+
+            # SegFormer: segment all images in this batch
+            all_crops = segment_batch(pil_images, seg_model, seg_processor,
+                                      device, args.min_area)
+
+            # CLIP: classify all crops across all images together
+            all_preds = classify_batch(
+                all_crops, class_names, prototypes, text_features,
+                class_indices, prompt_weights, args.temperature, args.top,
                 clip_model, clip_preprocess, device,
             )
-            result = {"bbox": crop_info["bbox"], "area_fraction": crop_info["area_fraction"]}
-            top_conf = preds["top"][0]["confidence"] if preds["top"] else 0.0
 
-            if top_conf >= args.min_conf:
-                result["predictions"] = preds["top"]
-                result["all_scores"]  = preds["all_scores"]
-                result["other_p"]     = preds["other_p"]
-            else:
-                result["filtered"]       = "low_confidence"
-                result["top_confidence"] = top_conf
-                result["other_p"]        = preds["other_p"]
+            # Write results + checkpoint
+            for meta, pil, preds in zip(valid_metas, pil_images, all_preds):
+                img_path = Path(meta["image_path"])
+                objectid = meta.get("objectid")
 
-            buildings.append(result)
+                # Filter by min confidence
+                buildings = []
+                for b in preds:
+                    top_conf = b["top"][0]["confidence"] if b["top"] else 0.0
+                    if top_conf >= args.min_conf:
+                        buildings.append(b)
+                        n_buildings_found += 1
+                    else:
+                        buildings.append({
+                            "bbox":          b["bbox"],
+                            "area_fraction": b["area_fraction"],
+                            "filtered":      "low_confidence",
+                            "top_confidence":top_conf,
+                            "other_p":       b["other_p"],
+                        })
 
-        r = {"image": str(img_path), "objectid": objectid, "buildings": buildings}
-        if meta.get("residential_type"):
-            r["residential_type"] = meta["residential_type"]
+                r = {"image": str(img_path), "objectid": objectid, "buildings": buildings}
+                if meta.get("residential_type"):
+                    r["residential_type"] = meta["residential_type"]
 
-        if args.save_viz:
-            viz_path = out_dir / (img_path.stem + ".viz.jpg")
-            save_viz(pil_image, buildings, viz_path)
-            r["viz"] = str(viz_path)
+                if args.save_viz and buildings:
+                    viz_path = out_dir / (img_path.stem + ".viz.jpg")
+                    save_viz(pil, [b for b in buildings if "top" in b], viz_path)
 
-        all_results.append(r)
+                jsonl_file.write(json.dumps(r) + "\n")
 
-        if full_run:
-            done_ids.add(str(objectid))
+                if full_run:
+                    done_ids.add(str(objectid))
 
-        detected = [b for b in buildings if "predictions" in b]
-        skipped  = [b for b in buildings if "filtered"    in b]
-        tqdm.write(f"  {img_path.name}: {len(detected)} building(s), {len(skipped)} low-conf")
+            jsonl_file.flush()
 
-        # Save checkpoint and partial results every 500 images
-        if full_run and len(done_ids) % 500 == 0:
-            save_checkpoint(checkpoint_path, done_ids)
-            with open(out_json, "w") as f:
-                json.dump(all_results, f)
+            if full_run and len(done_ids) % 500 == 0:
+                save_checkpoint(checkpoint_path, done_ids)
+                tqdm.write(f"  checkpoint: {len(done_ids)} done, {n_buildings_found} buildings found")
 
-    # Final save
-    with open(out_json, "w") as f:
-        json.dump(all_results, f, indent=2)
+    jsonl_file.close()
     if full_run:
         save_checkpoint(checkpoint_path, done_ids)
 
-    print(f"\nSaved to {out_json}")
+    print(f"\nResults → {results_path}")
+    print(f"Buildings with predictions: {n_buildings_found}")
 
-    # ── Per-building aggregation (full run only) ──────────────────────────────
+    # ── Aggregate per building ─────────────────────────────────────────────
     if full_run:
-        aggregated = aggregate_building_predictions(all_results)
+        print("Aggregating per-building labels...")
+        aggregated = aggregate_building_predictions(results_path)
         agg_path   = out_dir / "buildings_classified.json"
         with open(agg_path, "w") as f:
             json.dump(aggregated, f, indent=2)
-        print(f"Aggregated labels for {len(aggregated)} buildings → {agg_path}")
+        print(f"Aggregated {len(aggregated)} buildings → {agg_path}")
 
         label_counts = defaultdict(int)
         for v in aggregated.values():

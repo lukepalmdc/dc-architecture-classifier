@@ -14,3 +14,4 @@ streamlit
 seaborn
 transformers
 scipy
+jsonlines
