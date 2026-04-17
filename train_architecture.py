@@ -345,8 +345,9 @@ def learn_prompt_weights(train_paths, train_labels, text_features, class_indices
     print("Learning prompt weights from training images...")
     from sklearn.linear_model import Ridge
 
-    train_features = encode_images_batch(train_paths, desc="Prompt weights")  # [N x D]
-    sims = train_features @ text_features.cpu().float().numpy().T  # [N x num_prompts]
+    train_features = encode_images_batch(train_paths, desc="Prompt weights")  # [N x D] numpy
+    tf_gpu = torch.tensor(train_features, dtype=text_features.dtype, device=device)
+    sims = (tf_gpu @ text_features.T).cpu().float().numpy()        # [N x num_prompts]
 
     weights = np.ones(len(class_indices))                   # fallback: uniform
 
@@ -528,14 +529,16 @@ if TUNE_ALPHA:
         encode_images_batch(train_paths, desc="Alpha tune encode"), dtype=torch.float32
     ).to(device)
     train_proto_tensor = torch.tensor(prototypes, dtype=torch.float32).to(device=device, dtype=train_feats.dtype)
-    train_proto_scores = torch.sigmoid(
-        train_feats @ train_proto_tensor.T / TEMPERATURE
-    ).cpu().numpy()
+    train_proto_scores = torch.sigmoid(train_feats @ train_proto_tensor.T / TEMPERATURE)  # [N x C] on GPU
+
+    # Move text scores to GPU for blending
+    train_probs_text_gpu = torch.tensor(train_probs_text, dtype=train_feats.dtype, device=device)
+    train_labels_gpu     = torch.tensor(train_labels[:len(train_feats)], device=device)
 
     best_alpha, best_acc = PROTO_WEIGHT, 0.0
     for alpha in tqdm(np.arange(0.0, 1.05, 0.05), desc="Tuning alpha", unit="α"):
-        blended = alpha * train_proto_scores + (1 - alpha) * train_probs_text
-        acc = (blended.argmax(axis=1) == train_labels[:len(blended)]).mean()
+        blended = alpha * train_proto_scores + (1 - alpha) * train_probs_text_gpu
+        acc = (blended.argmax(dim=1) == train_labels_gpu).float().mean().item()
         if acc > best_acc:
             best_acc, best_alpha = acc, alpha
 
