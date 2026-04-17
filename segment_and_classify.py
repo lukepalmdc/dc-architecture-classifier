@@ -12,7 +12,9 @@ Usage:
 
 import argparse
 import json
+import sqlite3
 from pathlib import Path
+from collections import defaultdict
 
 import numpy as np
 import torch
@@ -56,12 +58,17 @@ COLORS = ["#FF6B6B", "#4ECDC4", "#45B7D1", "#96CEB4", "#FFEAA7", "#DDA0DD"]
 
 def parse_args():
     p = argparse.ArgumentParser()
-    p.add_argument("input",         help="Image file or directory")
+    p.add_argument("input",         nargs="?", default=None,
+                   help="Image file or directory (omit to run full DC pipeline from image_status.db)")
+    p.add_argument("--full-run",    action="store_true",
+                   help="Run on all downloaded buildings from data/image_status.db")
+    p.add_argument("--db",          default="data/image_status.db",
+                   help="SQLite DB from fetch_images.py (default: data/image_status.db)")
     p.add_argument("--exp",         default=None,
                    help="Experiment name under outputs/ (default: best by accuracy)")
     p.add_argument("--top",         type=int,   default=3)
-    p.add_argument("--min-conf",    type=float, default=0.4,
-                   help="Reject CLIP crops below this confidence (default 0.4)")
+    p.add_argument("--min-conf",    type=float, default=0.7,
+                   help="Reject CLIP crops below this confidence (default 0.7)")
     p.add_argument("--min-area",    type=float, default=0.06,
                    help="Ignore building regions smaller than this fraction of image (default 0.06)")
     p.add_argument("--temperature", type=float, default=0.3)
@@ -141,6 +148,74 @@ def encode_text(style_prompts, class_names, clip_model, device):
         text_features = clip_model.encode_text(tokens)
         text_features = text_features / text_features.norm(dim=-1, keepdim=True)
     return text_features, class_indices
+
+
+# =============================================================================
+# FULL-RUN DB HELPERS
+# =============================================================================
+
+def load_images_from_db(db_path):
+    """
+    Load all successfully downloaded images from image_status.db.
+    Returns list of {"objectid", "image_path", "residential_type", "address"}.
+    """
+    conn = sqlite3.connect(db_path)
+    rows = conn.execute(
+        "SELECT objectid, image_path, residential_type, address "
+        "FROM status WHERE state='done' AND image_path IS NOT NULL"
+    ).fetchall()
+    conn.close()
+    return [
+        {"objectid": r[0], "image_path": r[1],
+         "residential_type": r[2], "address": r[3]}
+        for r in rows if Path(r[1]).exists()
+    ]
+
+
+def load_checkpoint(checkpoint_path):
+    """Return set of already-processed objectids."""
+    if not Path(checkpoint_path).exists():
+        return set()
+    with open(checkpoint_path) as f:
+        return set(json.load(f))
+
+
+def save_checkpoint(checkpoint_path, done_ids):
+    with open(checkpoint_path, "w") as f:
+        json.dump(list(done_ids), f)
+
+
+def aggregate_building_predictions(all_results):
+    """
+    Group per-image results by objectid, aggregate crop predictions.
+    For each building, average confidence scores across all images and crops,
+    return top label + confidence.
+    """
+    by_building = defaultdict(list)
+    for r in all_results:
+        oid = r.get("objectid")
+        if oid is None:
+            continue
+        for b in r.get("buildings", []):
+            if "predictions" in b and "all_scores" in b:
+                by_building[oid].append(b["all_scores"])
+
+    aggregated = {}
+    for oid, score_dicts in by_building.items():
+        # Average all_scores across all crops for this building
+        avg = defaultdict(float)
+        for sd in score_dicts:
+            for lbl, val in sd.items():
+                avg[lbl] += val / len(score_dicts)
+        top_label = max(avg, key=avg.get)
+        aggregated[oid] = {
+            "label":      top_label,
+            "confidence": round(avg[top_label], 4),
+            "other_p":    round(1.0 - avg[top_label], 4),
+            "all_scores": {k: round(v, 4) for k, v in sorted(avg.items(), key=lambda x: -x[1])},
+            "n_crops":    len(score_dicts),
+        }
+    return aggregated
 
 
 # =============================================================================
@@ -283,9 +358,15 @@ def classify_crop(pil_crop, class_names, prototypes, text_features,
     else:
         scores = text_scores
 
-    scores_np = scores.squeeze(0).cpu().float().numpy()
-    top_idx   = np.argsort(-scores_np)[:top_k]
-    return [{"label": class_names[i], "confidence": float(scores_np[i])} for i in top_idx]
+    scores_np  = scores.squeeze(0).cpu().float().numpy()
+    top_idx    = np.argsort(-scores_np)[:top_k]
+    top_conf   = float(scores_np[top_idx[0]]) if len(top_idx) else 0.0
+
+    return {
+        "top":        [{"label": class_names[i], "confidence": float(scores_np[i])} for i in top_idx],
+        "all_scores": {class_names[i]: round(float(scores_np[i]), 4) for i in range(len(class_names))},
+        "other_p":    round(1.0 - top_conf, 4),   # prob mass not explained by top prediction
+    }
 
 
 # =============================================================================
@@ -302,7 +383,7 @@ def save_viz(pil_image, buildings, out_path):
         color = COLORS[i % len(COLORS)]
         draw.rectangle([x1, y1, x2, y2], outline=color, width=3)
         top = b["predictions"][0]
-        draw.text((x1 + 4, y1 + 4), f"{top['label']} {top['confidence']:.2f}", fill=color)
+        draw.text((x1 + 4, y1 + 4), f"{top['label']} {top['confidence']:.2f}  other={b.get('other_p',0):.2f}", fill=color)
     viz.save(out_path)
 
 
@@ -340,35 +421,54 @@ def main():
     text_features, class_indices = encode_text(style_prompts, class_names, clip_model, device)
 
     # ── Gather images ─────────────────────────────────────────────────────────
-    input_path  = Path(args.input)
-    image_paths = (
-        sorted(input_path.glob("*.jpg")) + sorted(input_path.glob("*.png"))
-        if input_path.is_dir() else [input_path]
-    )
-    if args.sample and args.sample < len(image_paths):
-        rng = np.random.default_rng(args.seed)
-        image_paths = list(rng.choice(image_paths, size=args.sample, replace=False))
-        print(f"Sampled {args.sample} images (seed={args.seed})")
-
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    out_json = Path(args.out) if args.out else out_dir / "results.json"
+    out_json       = Path(args.out) if args.out else out_dir / "results.json"
+    checkpoint_path = out_dir / "checkpoint.json"
 
-    print(f"Processing {len(image_paths)} image(s)...\n")
+    if args.full_run or not args.input:
+        db_rows    = load_images_from_db(args.db)
+        done_ids   = load_checkpoint(checkpoint_path)
+        pending    = [r for r in db_rows if str(r["objectid"]) not in done_ids]
+        image_metas = pending
+        print(f"Full run: {len(db_rows)} buildings in DB, "
+              f"{len(done_ids)} already done, {len(pending)} remaining")
+        full_run = True
+    else:
+        input_path = Path(args.input)
+        image_paths = (
+            sorted(input_path.glob("*.jpg")) + sorted(input_path.glob("*.png"))
+            if input_path.is_dir() else [input_path]
+        )
+        if args.sample and args.sample < len(image_paths):
+            rng = np.random.default_rng(args.seed)
+            image_paths = list(rng.choice(image_paths, size=args.sample, replace=False))
+            print(f"Sampled {args.sample} images (seed={args.seed})")
+        image_metas = [{"objectid": None, "image_path": str(p)} for p in image_paths]
+        full_run = False
+
+    print(f"Processing {len(image_metas)} image(s)...\n")
 
     all_results = []
-    for img_path in tqdm(image_paths, unit="img"):
+    done_ids    = load_checkpoint(checkpoint_path) if full_run else set()
+
+    for meta in tqdm(image_metas, unit="img"):
+        img_path = Path(meta["image_path"])
+        objectid = meta.get("objectid")
+
         try:
             pil_image = Image.open(img_path).convert("RGB")
         except Exception as e:
-            all_results.append({"image": str(img_path), "error": str(e)})
+            all_results.append({"image": str(img_path), "objectid": objectid, "error": str(e)})
             continue
 
         crops = segment_buildings(pil_image, seg_model, seg_processor, device, args.min_area)
 
         if not crops:
-            all_results.append({"image": str(img_path), "filtered": "no_buildings", "buildings": []})
-            tqdm.write(f"  SKIP  {img_path.name}: no buildings detected")
+            all_results.append({"image": str(img_path), "objectid": objectid,
+                                 "filtered": "no_buildings", "buildings": []})
+            if full_run:
+                done_ids.add(str(objectid))
             continue
 
         buildings = []
@@ -380,16 +480,22 @@ def main():
                 clip_model, clip_preprocess, device,
             )
             result = {"bbox": crop_info["bbox"], "area_fraction": crop_info["area_fraction"]}
+            top_conf = preds["top"][0]["confidence"] if preds["top"] else 0.0
 
-            if preds and preds[0]["confidence"] >= args.min_conf:
-                result["predictions"] = preds
+            if top_conf >= args.min_conf:
+                result["predictions"] = preds["top"]
+                result["all_scores"]  = preds["all_scores"]
+                result["other_p"]     = preds["other_p"]
             else:
-                result["filtered"]        = "low_confidence"
-                result["top_confidence"]  = preds[0]["confidence"] if preds else 0.0
+                result["filtered"]       = "low_confidence"
+                result["top_confidence"] = top_conf
+                result["other_p"]        = preds["other_p"]
 
             buildings.append(result)
 
-        r = {"image": str(img_path), "buildings": buildings}
+        r = {"image": str(img_path), "objectid": objectid, "buildings": buildings}
+        if meta.get("residential_type"):
+            r["residential_type"] = meta["residential_type"]
 
         if args.save_viz:
             viz_path = out_dir / (img_path.stem + ".viz.jpg")
@@ -398,16 +504,41 @@ def main():
 
         all_results.append(r)
 
+        if full_run:
+            done_ids.add(str(objectid))
+
         detected = [b for b in buildings if "predictions" in b]
         skipped  = [b for b in buildings if "filtered"    in b]
-        tqdm.write(f"  OK    {img_path.name}: {len(detected)} building(s), {len(skipped)} low-conf")
-        for b in detected:
-            top = b["predictions"][0]
-            tqdm.write(f"          {top['label']:30s} {top['confidence']:.3f}  bbox={b['bbox']}")
+        tqdm.write(f"  {img_path.name}: {len(detected)} building(s), {len(skipped)} low-conf")
 
+        # Save checkpoint and partial results every 500 images
+        if full_run and len(done_ids) % 500 == 0:
+            save_checkpoint(checkpoint_path, done_ids)
+            with open(out_json, "w") as f:
+                json.dump(all_results, f)
+
+    # Final save
     with open(out_json, "w") as f:
         json.dump(all_results, f, indent=2)
+    if full_run:
+        save_checkpoint(checkpoint_path, done_ids)
+
     print(f"\nSaved to {out_json}")
+
+    # ── Per-building aggregation (full run only) ──────────────────────────────
+    if full_run:
+        aggregated = aggregate_building_predictions(all_results)
+        agg_path   = out_dir / "buildings_classified.json"
+        with open(agg_path, "w") as f:
+            json.dump(aggregated, f, indent=2)
+        print(f"Aggregated labels for {len(aggregated)} buildings → {agg_path}")
+
+        label_counts = defaultdict(int)
+        for v in aggregated.values():
+            label_counts[v["label"]] += 1
+        print("\nLabel distribution:")
+        for lbl, cnt in sorted(label_counts.items(), key=lambda x: -x[1]):
+            print(f"  {lbl:30s} {cnt}")
 
 
 if __name__ == "__main__":
