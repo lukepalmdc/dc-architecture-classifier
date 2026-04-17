@@ -152,8 +152,9 @@ def load_images_from_db(db_path):
     ).fetchall()
     conn.close()
     return [
-        {"objectid": r[0], "image_path": r[1], "residential_type": r[2], "address": r[3]}
-        for r in rows if Path(r[1]).exists()
+        {"objectid": r[0], "image_path": str(Path(r[1].replace("\\", "/"))),
+         "residential_type": r[2], "address": r[3]}
+        for r in rows if Path(r[1].replace("\\", "/")).exists()
     ]
 
 
