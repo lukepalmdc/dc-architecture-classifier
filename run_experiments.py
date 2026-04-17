@@ -22,26 +22,6 @@ else:
 
 EXPERIMENTS = [
     {
-        "name": "baseline_no_proto_no_weights",
-        "args": ["--no-prototypes", "--no-weights", "--no-tune-alpha", "--prompts", "prompts.json"],
-    },
-    {
-        "name": "proto_only",
-        "args": ["--use-prototypes", "--no-weights", "--no-tune-alpha", "--prompts", "prompts.json"],
-    },
-    {
-        "name": "weights_only",
-        "args": ["--no-prototypes", "--use-weights", "--no-tune-alpha", "--prompts", "prompts.json"],
-    },
-    {
-        "name": "proto_and_weights",
-        "args": ["--use-prototypes", "--use-weights", "--no-tune-alpha", "--prompts", "prompts.json"],
-    },
-    {
-        "name": "proto_weights_tuned_alpha",
-        "args": ["--use-prototypes", "--use-weights", "--tune-alpha", "--prompts", "prompts.json"],
-    },
-    {
         "name": "build_prompts_no_proto",
         "args": ["--no-prototypes", "--no-weights", "--no-tune-alpha", "--prompts", "build"],
     },
@@ -50,19 +30,14 @@ EXPERIMENTS = [
         "args": ["--use-prototypes", "--use-weights", "--tune-alpha", "--prompts", "build"],
     },
     {
-        "name": "high_temp",
+        "name": "build_prompts_full_temp_01",
         "args": ["--use-prototypes", "--use-weights", "--tune-alpha",
-                 "--temperature", "0.1", "--prompts", "prompts.json"],
+                 "--temperature", "0.1", "--prompts", "build"],
     },
     {
-        "name": "low_temp",
+        "name": "build_prompts_full_temp_02",
         "args": ["--use-prototypes", "--use-weights", "--tune-alpha",
-                 "--temperature", "0.05", "--prompts", "prompts.json"],
-    },
-    {
-        "name": "high_ridge",
-        "args": ["--use-prototypes", "--use-weights", "--tune-alpha",
-                 "--ridge-alpha", "0.1", "--prompts", "prompts.json"],
+                 "--temperature", "0.2", "--prompts", "build"],
     },
 ]
 
