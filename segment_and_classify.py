@@ -512,6 +512,8 @@ def main():
 
             # Write results + checkpoint
             for meta, pil, preds in zip(valid_metas, pil_images, all_preds):
+                if full_run:
+                    pil.close()   # free memory, no viz needed
                 img_path = Path(meta["image_path"])
                 objectid = meta.get("objectid")
 
@@ -520,7 +522,8 @@ def main():
                 for b in preds:
                     top_conf = b["top"][0]["confidence"] if b["top"] else 0.0
                     if top_conf >= args.min_conf:
-                        buildings.append(b)
+                        out_b = {k: v for k, v in b.items() if k != "crop"}
+                        buildings.append(out_b)
                         n_buildings_found += 1
                     else:
                         buildings.append({
@@ -535,7 +538,7 @@ def main():
                 if meta.get("residential_type"):
                     r["residential_type"] = meta["residential_type"]
 
-                if args.save_viz and buildings:
+                if args.save_viz and not full_run and buildings:
                     viz_path = out_dir / (img_path.stem + ".viz.jpg")
                     save_viz(pil, [b for b in buildings if "top" in b], viz_path)
 
