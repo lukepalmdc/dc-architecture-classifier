@@ -1,0 +1,92 @@
+ {
+    "neoclassical": [
+        "neoclassical architecture",
+        "monumental civic building with stone columns and pediment, Greek and Roman revival style",
+        "symmetrical government building with marble facade, Corinthian columns, grand staircase",
+        "U.S. Capitol or Lincoln Memorial style architecture, classical temple-like structure"
+    ],
+
+    "federal": [
+        "federal style architecture",
+        "early American brick townhouse with simple symmetry and restrained ornamentation",
+        "Georgian-influenced urban row house with fanlight above door and sash windows",
+        "18th century American colonial architecture with balanced proportions and minimal decoration"
+    ],
+
+    "victorian": [
+        "victorian architecture",
+        "ornate 19th century townhouse with decorative trim and asymmetrical facade",
+        "Queen Anne style house with bay windows, turrets, steep roof, and colorful exterior",
+        "dense urban row houses with wood detailing and elaborate cornices"
+    ],
+
+    "gothic_revival": [
+        "gothic revival architecture",
+        "stone church with pointed arches, stained glass windows, and flying buttresses",
+        "medieval-inspired cathedral with tall spires and ornate tracery",
+        "ivy-covered institutional building with lancet windows and vertical emphasis"
+    ],
+
+    "romanesque_revival": [
+        "romanesque revival architecture",
+        "heavy stone building with rounded arches and fortress-like appearance",
+        "19th century institutional building with thick masonry and arcaded windows",
+        "castle-like civic structure with towers and rusticated stone walls"
+    ],
+
+    "beaux_arts": [
+        "beaux arts architecture",
+        "grand civic building with elaborate classical ornamentation and symmetry",
+        "stone facade with columns, sculptures, arches, and decorative detailing",
+        "early 20th century institutional building with monumental scale and classical references"
+    ],
+
+    "art_deco": [
+        "art deco architecture",
+        "geometric skyscraper with stepped forms and stylized ornamentation",
+        "1920s building with zigzag motifs, vertical emphasis, and metallic details",
+        "streamlined facade with decorative patterns and symmetrical composition"
+    ],
+
+    "brutalist": [
+        "brutalist architecture",
+        "massive exposed concrete building with blocky geometric forms",
+        "monolithic government or university building with repetitive modular structure",
+        "raw concrete facade with heavy shadows and minimal decoration"
+    ],
+
+    "modernism": [
+        "modernist architecture",
+        "glass and steel building with clean lines and functional design",
+        "minimalist structure emphasizing simplicity and open space",
+        "mid-century institutional building with curtain wall glass facade"
+    ],
+
+    "postmodern": [
+        "postmodern architecture",
+        "building mixing classical and modern elements in playful composition",
+        "colorful facade with exaggerated forms and historical references",
+        "ironic use of columns, arches, and mixed materials in 1980s style building"
+    ],
+
+    "international_style": [
+        "international style architecture",
+        "rectangular glass skyscraper with no ornamentation",
+        "steel frame office tower with curtain wall glass facade",
+        "minimalist modern high-rise emphasizing volume and function"
+    ],
+
+    "craftsman": [
+        "american craftsman bungalow",
+        "small residential house with wide porch and exposed wooden beams",
+        "low-pitched roof with natural materials and handcrafted details",
+        "early 20th century suburban home emphasizing wood and stone craftsmanship"
+    ],
+
+    "georgian": [
+        "georgian architecture",
+        "symmetrical brick townhouse with centered door and sash windows",
+        "balanced facade with minimal ornamentation and classical proportions",
+        "colonial era residential building with strict symmetry and red brick exterior"
+    ]
+}

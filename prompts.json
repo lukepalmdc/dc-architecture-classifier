@@ -1,0 +1,92 @@
+{
+  "neoclassical": [
+    "neoclassical building",
+    "stone neoclassical facade with columns",
+    "classical government building with columns and pediment",
+    "monumental civic building with marble columns"
+  ],
+
+  "federal": [
+    "federal style building",
+    "brick federal townhouse",
+    "symmetrical brick colonial house",
+    "simple 18th century brick row house"
+  ],
+
+  "victorian": [
+    "victorian house",
+    "ornate victorian townhouse",
+    "queen anne style house with turret",
+    "decorative 19th century row house"
+  ],
+
+  "gothic_revival": [
+    "gothic revival church",
+    "stone cathedral with pointed arches",
+    "church with spires and stained glass",
+    "gothic stone building with tall windows"
+  ],
+
+  "romanesque_revival": [
+    "romanesque building",
+    "stone building with rounded arches",
+    "castle like stone structure",
+    "heavy masonry building with arches"
+  ],
+
+  "beaux_arts": [
+    "beaux arts building",
+    "ornate classical civic building",
+    "grand stone building with sculptures",
+    "symmetrical decorative government building"
+  ],
+
+  "art_deco": [
+    "art deco building",
+    "geometric skyscraper art deco style",
+    "decorative 1920s building facade",
+    "stepped art deco tower"
+  ],
+
+  "brutalist": [
+    "brutalist building",
+    "concrete brutalist structure",
+    "massive concrete block building",
+    "monolithic concrete architecture"
+  ],
+
+  "modernism": [
+    "modernist building",
+    "glass modern building",
+    "minimalist steel and glass structure",
+    "functional modern architecture"
+  ],
+
+  "postmodern": [
+    "postmodern building",
+    "colorful postmodern architecture",
+    "mixed style decorative building",
+    "playful 1980s building facade"
+  ],
+
+  "international_style": [
+    "international style skyscraper",
+    "glass office tower",
+    "minimalist glass and steel building",
+    "rectangular modern office building"
+  ],
+
+  "craftsman": [
+    "craftsman house",
+    "wood bungalow house",
+    "low roof bungalow with porch",
+    "small wooden residential house"
+  ],
+
+  "georgian": [
+    "georgian house",
+    "symmetrical brick georgian townhouse",
+    "colonial brick house with sash windows",
+    "balanced red brick residential building"
+  ]
+}

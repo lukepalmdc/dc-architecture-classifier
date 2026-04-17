@@ -1,0 +1,12 @@
+git+https://github.com/openai/CLIP.git
+torch
+torchvision
+Pillow
+numpy
+scikit-learn
+tqdm
+requests
+aiohttp
+aiofiles
+shapely
+pytest
