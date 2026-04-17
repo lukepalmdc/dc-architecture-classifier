@@ -246,7 +246,7 @@ def encode_text_prompts(style_prompts):
         text_features = model.encode_text(text_tokens)
         text_features /= text_features.norm(dim=-1, keepdim=True)
 
-    return text_features, class_indices, prompt_counts
+    return text_features.cpu(), class_indices, prompt_counts
 
 
 text_features, class_indices, prompt_counts = encode_text_prompts(STYLE_PROMPTS)
@@ -423,8 +423,8 @@ def run_inference(image_paths, prototypes=None, prompt_weights=None, proto_weigh
 
     # --- Weighted text prompt scores ---
     # raw cosine sims [N x num_prompts]
-    raw_sims = (image_features @ text_features.T / TEMPERATURE)
-    prompt_sims = torch.sigmoid(raw_sims).numpy()           # keep sigmoid per user
+    raw_sims = (image_features @ text_features.to(device).T / TEMPERATURE)
+    prompt_sims = torch.sigmoid(raw_sims).cpu().numpy()     # keep sigmoid per user
 
     # Apply per-prompt weights when available, else uniform mean
     weights = prompt_weights if prompt_weights is not None \
@@ -446,9 +446,9 @@ def run_inference(image_paths, prototypes=None, prompt_weights=None, proto_weigh
         return text_class_scores
 
     # --- Prototype scores ---
-    proto_tensor = torch.tensor(prototypes, dtype=torch.float32)   # [C x D]
+    proto_tensor = torch.tensor(prototypes, dtype=torch.float32).to(device)  # [C x D]
     proto_raw    = (image_features @ proto_tensor.T / TEMPERATURE)
-    proto_scores = torch.sigmoid(proto_raw).numpy()                # [N x C]
+    proto_scores = torch.sigmoid(proto_raw).cpu().numpy()          # [N x C]
 
     # --- Blend ---
     return proto_weight * proto_scores + (1 - proto_weight) * text_class_scores
@@ -508,8 +508,8 @@ if TUNE_ALPHA:
         encode_images_batch(train_paths, desc="Alpha tune encode"), dtype=torch.float32
     )
     train_proto_scores = torch.sigmoid(
-        train_feats @ train_proto_tensor.T / TEMPERATURE
-    ).numpy()
+        train_feats.to(device) @ train_proto_tensor.to(device).T / TEMPERATURE
+    ).cpu().numpy()
 
     best_alpha, best_acc = PROTO_WEIGHT, 0.0
     for alpha in tqdm(np.arange(0.0, 1.05, 0.05), desc="Tuning alpha", unit="α"):
