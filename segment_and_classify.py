@@ -198,9 +198,10 @@ def classify_crop(pil_crop, class_names, prototypes, text_features,
                   clip_model, clip_preprocess, device):
     img_t = clip_preprocess(pil_crop).unsqueeze(0).to(device)
 
-    with torch.no_grad(), torch.cuda.amp.autocast(enabled=device == "cuda"):
+    with torch.no_grad(), torch.amp.autocast("cuda", enabled=device == "cuda"):
         feats = clip_model.encode_image(img_t)
         feats = feats / feats.norm(dim=-1, keepdim=True)
+    feats = feats.to(dtype=text_features.dtype)
 
     num_classes = len(class_names)
     raw         = feats @ text_features.T / temperature
