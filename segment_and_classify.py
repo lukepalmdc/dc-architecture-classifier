@@ -60,14 +60,17 @@ def parse_args():
     p.add_argument("--exp",         default=None,
                    help="Experiment name under outputs/ (default: best by accuracy)")
     p.add_argument("--top",         type=int,   default=3)
-    p.add_argument("--min-conf",    type=float, default=0.3,
-                   help="Reject crops below this confidence (default 0.3)")
-    p.add_argument("--min-area",    type=float, default=0.02,
-                   help="Ignore building regions smaller than this fraction of image")
+    p.add_argument("--min-conf",    type=float, default=0.4,
+                   help="Reject crops below this confidence (default 0.4)")
+    p.add_argument("--min-area",    type=float, default=0.06,
+                   help="Ignore building regions smaller than this fraction of image (default 0.06)")
     p.add_argument("--temperature", type=float, default=0.3)
-    p.add_argument("--out",         default=None, help="Save results JSON to this path")
+    p.add_argument("--out-dir",     default="dctest",
+                   help="Directory for viz images and results JSON (default: dctest)")
+    p.add_argument("--out",         default=None,
+                   help="Results JSON filename (default: <out-dir>/results.json)")
     p.add_argument("--save-viz",    action="store_true",
-                   help="Save annotated image alongside each input")
+                   help="Save annotated images to out-dir")
     p.add_argument("--sample",      type=int, default=None,
                    help="Randomly sample N images for testing (default: all)")
     p.add_argument("--seed",        type=int, default=42)
@@ -293,6 +296,10 @@ def main():
         image_paths = list(rng.choice(image_paths, size=args.sample, replace=False))
         print(f"Sampled {args.sample} images (seed={args.seed})")
 
+    out_dir = Path(args.out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_json = Path(args.out) if args.out else out_dir / "results.json"
+
     print(f"Processing {len(image_paths)} image(s)...\n")
 
     all_results = []
@@ -331,7 +338,7 @@ def main():
         r = {"image": str(img_path), "buildings": buildings}
 
         if args.save_viz:
-            viz_path    = img_path.with_suffix(".viz.jpg")
+            viz_path = out_dir / (img_path.stem + ".viz.jpg")
             save_viz(pil_image, buildings, viz_path)
             r["viz"] = str(viz_path)
 
@@ -344,10 +351,9 @@ def main():
             top = b["predictions"][0]
             tqdm.write(f"          {top['label']:30s} {top['confidence']:.3f}  bbox={b['bbox']}")
 
-    if args.out:
-        with open(args.out, "w") as f:
-            json.dump(all_results, f, indent=2)
-        print(f"\nSaved to {args.out}")
+    with open(out_json, "w") as f:
+        json.dump(all_results, f, indent=2)
+    print(f"\nSaved to {out_json}")
 
 
 if __name__ == "__main__":
