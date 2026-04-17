@@ -270,21 +270,20 @@ def encode_images_batch(image_paths, desc="Encoding"):
     all_features = []
     batches = range(0, len(image_paths), BATCH_SIZE)
 
-    for i in tqdm(batches, desc=desc, unit="batch", leave=False):
-        batch_paths = image_paths[i:i+BATCH_SIZE]
-
-        with ThreadPoolExecutor(max_workers=NUM_THREADS) as executor:
+    with ThreadPoolExecutor(max_workers=NUM_THREADS) as executor:
+        for i in tqdm(batches, desc=desc, unit="batch", leave=False):
+            batch_paths = image_paths[i:i+BATCH_SIZE]
             images = list(executor.map(load_image, batch_paths))
 
-        valid_images = [img for img in images if img is not None]
-        if not valid_images:
-            continue
+            valid_images = [img for img in images if img is not None]
+            if not valid_images:
+                continue
 
-        batch = torch.stack(valid_images).to(device)
-        with torch.no_grad():
-            feats = model.encode_image(batch)
-            feats /= feats.norm(dim=-1, keepdim=True)
-        all_features.append(feats.cpu().numpy())
+            batch = torch.stack(valid_images).to(device)
+            with torch.no_grad():
+                feats = model.encode_image(batch)
+                feats /= feats.norm(dim=-1, keepdim=True)
+            all_features.append(feats.cpu().numpy())
 
     return np.concatenate(all_features, axis=0) if all_features else np.zeros((0, 512))
 
@@ -338,7 +337,7 @@ def learn_prompt_weights(train_paths, train_labels, text_features, class_indices
     from sklearn.linear_model import Ridge
 
     train_features = encode_images_batch(train_paths, desc="Prompt weights")  # [N x D]
-    sims = train_features @ text_features.numpy().T         # [N x num_prompts]
+    sims = train_features @ text_features.cpu().float().numpy().T  # [N x num_prompts]
 
     weights = np.ones(len(class_indices))                   # fallback: uniform
 
@@ -407,21 +406,20 @@ def run_inference(image_paths, prototypes=None, prompt_weights=None, proto_weigh
     """
     all_image_features = []
 
-    for i in tqdm(range(0, len(image_paths), BATCH_SIZE), desc="Inference", unit="batch", leave=False):
-        batch_paths = image_paths[i:i+BATCH_SIZE]
-
-        with ThreadPoolExecutor(max_workers=NUM_THREADS) as executor:
+    with ThreadPoolExecutor(max_workers=NUM_THREADS) as executor:
+        for i in tqdm(range(0, len(image_paths), BATCH_SIZE), desc="Inference", unit="batch", leave=False):
+            batch_paths = image_paths[i:i+BATCH_SIZE]
             images = list(executor.map(load_image, batch_paths))
 
-        valid_images = [img for img in images if img is not None]
-        if not valid_images:
-            continue
+            valid_images = [img for img in images if img is not None]
+            if not valid_images:
+                continue
 
-        batch = torch.stack(valid_images).to(device)
-        with torch.no_grad():
-            feats = model.encode_image(batch)
-            feats /= feats.norm(dim=-1, keepdim=True)
-        all_image_features.append(feats.cpu())
+            batch = torch.stack(valid_images).to(device)
+            with torch.no_grad():
+                feats = model.encode_image(batch)
+                feats /= feats.norm(dim=-1, keepdim=True)
+            all_image_features.append(feats.cpu())
 
     image_features = torch.cat(all_image_features).to(device)  # [N x D] on GPU
 
@@ -449,7 +447,7 @@ def run_inference(image_paths, prototypes=None, prompt_weights=None, proto_weigh
         return text_class_scores
 
     # --- Prototype scores ---
-    proto_tensor = torch.tensor(prototypes, dtype=torch.float32).to(device)  # [C x D] on GPU
+    proto_tensor = torch.tensor(prototypes, dtype=torch.float32).to(device=device, dtype=image_features.dtype)  # [C x D] on GPU
     proto_raw    = (image_features @ proto_tensor.T / TEMPERATURE)
     proto_scores = torch.sigmoid(proto_raw).cpu().numpy()          # [N x C]
 
@@ -506,12 +504,12 @@ if TUNE_ALPHA:
     print("\nTuning prototype blend alpha on train set...")
     train_probs_text  = run_inference(train_paths, prototypes=None,
                                       prompt_weights=prompt_weights)
-    train_proto_tensor = torch.tensor(prototypes, dtype=torch.float32)
     train_feats        = torch.tensor(
         encode_images_batch(train_paths, desc="Alpha tune encode"), dtype=torch.float32
-    )
+    ).to(device)
+    train_proto_tensor = torch.tensor(prototypes, dtype=torch.float32).to(device=device, dtype=train_feats.dtype)
     train_proto_scores = torch.sigmoid(
-        train_feats.to(device) @ train_proto_tensor.to(device).T / TEMPERATURE
+        train_feats @ train_proto_tensor.T / TEMPERATURE
     ).cpu().numpy()
 
     best_alpha, best_acc = PROTO_WEIGHT, 0.0
