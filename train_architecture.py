@@ -266,23 +266,32 @@ def encode_images_batch(image_paths, desc="Encoding"):
     """
     Encode a list of image paths through CLIP vision encoder.
     Returns normalized features [N x D] as numpy array.
+    Prefetches next batch on CPU while GPU processes current batch.
     """
     all_features = []
-    batches = range(0, len(image_paths), BATCH_SIZE)
+    batch_list = [image_paths[i:i+BATCH_SIZE] for i in range(0, len(image_paths), BATCH_SIZE)]
+    use_amp = device == "cuda"
 
     with ThreadPoolExecutor(max_workers=NUM_THREADS) as executor:
-        for i in tqdm(batches, desc=desc, unit="batch", leave=False):
-            batch_paths = image_paths[i:i+BATCH_SIZE]
-            images = list(executor.map(load_image, batch_paths))
+        # Pre-load first batch
+        prefetch = executor.submit(lambda b: list(executor.map(load_image, b)), batch_list[0]) if batch_list else None
+
+        for idx in tqdm(range(len(batch_list)), desc=desc, unit="batch", leave=False):
+            images = prefetch.result()
+
+            # Kick off next batch load immediately while GPU works
+            if idx + 1 < len(batch_list):
+                next_paths = batch_list[idx + 1]
+                prefetch = executor.submit(lambda b: list(executor.map(load_image, b)), next_paths)
 
             valid_images = [img for img in images if img is not None]
             if not valid_images:
                 continue
 
-            batch = torch.stack(valid_images).to(device)
-            with torch.no_grad():
+            batch = torch.stack(valid_images).pin_memory().to(device, non_blocking=True)
+            with torch.no_grad(), torch.cuda.amp.autocast(enabled=use_amp):
                 feats = model.encode_image(batch)
-                feats /= feats.norm(dim=-1, keepdim=True)
+                feats = feats / feats.norm(dim=-1, keepdim=True)
             all_features.append(feats.cpu().numpy())
 
     return np.concatenate(all_features, axis=0) if all_features else np.zeros((0, 512))
@@ -405,20 +414,27 @@ def run_inference(image_paths, prototypes=None, prompt_weights=None, proto_weigh
         class_probs: [N x num_classes]
     """
     all_image_features = []
+    batch_list = [image_paths[i:i+BATCH_SIZE] for i in range(0, len(image_paths), BATCH_SIZE)]
+    use_amp = device == "cuda"
 
     with ThreadPoolExecutor(max_workers=NUM_THREADS) as executor:
-        for i in tqdm(range(0, len(image_paths), BATCH_SIZE), desc="Inference", unit="batch", leave=False):
-            batch_paths = image_paths[i:i+BATCH_SIZE]
-            images = list(executor.map(load_image, batch_paths))
+        prefetch = executor.submit(lambda b: list(executor.map(load_image, b)), batch_list[0]) if batch_list else None
+
+        for idx in tqdm(range(len(batch_list)), desc="Inference", unit="batch", leave=False):
+            images = prefetch.result()
+
+            if idx + 1 < len(batch_list):
+                next_paths = batch_list[idx + 1]
+                prefetch = executor.submit(lambda b: list(executor.map(load_image, b)), next_paths)
 
             valid_images = [img for img in images if img is not None]
             if not valid_images:
                 continue
 
-            batch = torch.stack(valid_images).to(device)
-            with torch.no_grad():
+            batch = torch.stack(valid_images).pin_memory().to(device, non_blocking=True)
+            with torch.no_grad(), torch.cuda.amp.autocast(enabled=use_amp):
                 feats = model.encode_image(batch)
-                feats /= feats.norm(dim=-1, keepdim=True)
+                feats = feats / feats.norm(dim=-1, keepdim=True)
             all_image_features.append(feats.cpu())
 
     image_features = torch.cat(all_image_features).to(device)  # [N x D] on GPU
