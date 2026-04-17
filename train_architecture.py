@@ -438,7 +438,7 @@ def run_inference(image_paths, prototypes=None, prompt_weights=None, proto_weigh
                 feats = feats / feats.norm(dim=-1, keepdim=True)
             all_image_features.append(feats.cpu())
 
-    image_features = torch.cat(all_image_features).to(device)  # [N x D] on GPU
+    image_features = torch.cat(all_image_features).to(device=device, dtype=text_features.dtype)  # [N x D] on GPU, matched dtype
 
     # --- Weighted text prompt scores (all on GPU) ---
     raw_sims    = image_features @ text_features.T / TEMPERATURE   # [N x P]
