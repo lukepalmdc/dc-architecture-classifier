@@ -439,36 +439,40 @@ def run_inference(image_paths, prototypes=None, prompt_weights=None, proto_weigh
 
     image_features = torch.cat(all_image_features).to(device)  # [N x D] on GPU
 
-    # --- Weighted text prompt scores ---
-    raw_sims = (image_features @ text_features.T / TEMPERATURE)
-    prompt_sims = torch.sigmoid(raw_sims).cpu().numpy()     # keep sigmoid per user
+    # --- Weighted text prompt scores (all on GPU) ---
+    raw_sims    = image_features @ text_features.T / TEMPERATURE   # [N x P]
+    prompt_sims = torch.sigmoid(raw_sims)                          # keep sigmoid per user
 
-    # Apply per-prompt weights when available, else uniform mean
-    weights = prompt_weights if prompt_weights is not None \
-              else np.ones(len(class_indices)) / max(prompt_counts)
+    # Build weight and class-index tensors on GPU
+    if prompt_weights is not None:
+        w = torch.tensor(prompt_weights, dtype=image_features.dtype, device=device)  # [P]
+    else:
+        w = torch.ones(len(class_indices), dtype=image_features.dtype, device=device) / max(prompt_counts)
 
-    text_class_scores = np.zeros((len(image_features), num_classes))
-    weight_sums       = np.zeros(num_classes)
+    idx = torch.tensor(class_indices, device=device)               # [P]
 
-    for j, cls_idx in enumerate(class_indices):
-        text_class_scores[:, cls_idx] += weights[j] * prompt_sims[:, j]
-        weight_sums[cls_idx]          += weights[j]
+    # Weighted scatter-add: text_class_scores[n, c] = sum of w[j]*prompt_sims[n,j] for j->c
+    weighted = prompt_sims * w.unsqueeze(0)                        # [N x P]
+    text_class_scores = torch.zeros(len(image_features), num_classes, dtype=image_features.dtype, device=device)
+    text_class_scores.scatter_add_(1, idx.unsqueeze(0).expand(len(image_features), -1), weighted)
 
     # Normalize by total weight per class
-    for c in range(num_classes):
-        if weight_sums[c] > 0:
-            text_class_scores[:, c] /= weight_sums[c]
+    weight_sums = torch.zeros(num_classes, dtype=image_features.dtype, device=device)
+    weight_sums.scatter_add_(0, idx, w)
+    weight_sums = weight_sums.clamp(min=1e-8)
+    text_class_scores = text_class_scores / weight_sums.unsqueeze(0)
 
     if prototypes is None:
-        return text_class_scores
+        return text_class_scores.cpu().numpy()
 
     # --- Prototype scores ---
-    proto_tensor = torch.tensor(prototypes, dtype=torch.float32).to(device=device, dtype=image_features.dtype)  # [C x D] on GPU
-    proto_raw    = (image_features @ proto_tensor.T / TEMPERATURE)
-    proto_scores = torch.sigmoid(proto_raw).cpu().numpy()          # [N x C]
+    proto_tensor = torch.tensor(prototypes, dtype=torch.float32).to(device=device, dtype=image_features.dtype)
+    proto_raw    = image_features @ proto_tensor.T / TEMPERATURE
+    proto_scores = torch.sigmoid(proto_raw)                        # [N x C]
 
     # --- Blend ---
-    return proto_weight * proto_scores + (1 - proto_weight) * text_class_scores
+    blended = proto_weight * proto_scores + (1 - proto_weight) * text_class_scores
+    return blended.cpu().numpy()
 
 
 # =========================
