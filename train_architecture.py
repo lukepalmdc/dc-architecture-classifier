@@ -16,6 +16,7 @@ Author: you
 
 # =========================
 
+import os
 import numpy as np
 from pathlib import Path
 from PIL import Image
@@ -569,7 +570,17 @@ np.save("test_labels.npy", test_labels)
 np.save("prototypes.npy", prototypes)
 np.save("prompt_weights.npy", prompt_weights)
 
-print("\nSaved: test_probs.npy, test_labels.npy, prototypes.npy, prompt_weights.npy")
+# Also save per-experiment so segment_and_classify can load the right artifacts
+os.makedirs(OUT_DIR, exist_ok=True)
+if prototypes is not None:
+    np.save(f"{OUT_DIR}/prototypes.npy", prototypes)
+if prompt_weights is not None:
+    np.save(f"{OUT_DIR}/prompt_weights.npy", prompt_weights)
+# Save prompts so inference knows which prompts weights were trained against
+with open(f"{OUT_DIR}/prompts.json", "w") as f:
+    json.dump(STYLE_PROMPTS, f, indent=2)
+
+print("\nSaved: test_probs.npy, prototypes.npy, prompt_weights.npy, prompts.json")
 
 
 # =========================

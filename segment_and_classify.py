@@ -18,6 +18,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from PIL import Image, ImageDraw
+from tqdm import tqdm
 import clip
 from transformers import SegformerImageProcessor, SegformerForSemanticSegmentation
 from scipy import ndimage
@@ -25,8 +26,7 @@ from scipy import ndimage
 # ── ADE20K building class IDs (0-indexed) ───────────────────────────────────
 # 1=building/edifice  25=house  48=skyscraper  84=tower
 BUILDING_IDS = {1, 25, 48, 84}
-
-BBOX_PAD_FRAC = 0.05   # expand each crop bbox by 5%
+BBOX_PAD_FRAC = 0.05
 
 LABEL_DISPLAY = {
     "art_deco":           "Art Deco",
@@ -47,6 +47,8 @@ LABEL_DISPLAY = {
     "victorian":          "Victorian",
 }
 
+COLORS = ["#FF6B6B", "#4ECDC4", "#45B7D1", "#96CEB4", "#FFEAA7", "#DDA0DD"]
+
 
 # =============================================================================
 # CLI
@@ -54,37 +56,19 @@ LABEL_DISPLAY = {
 
 def parse_args():
     p = argparse.ArgumentParser()
-    p.add_argument("input",        help="Image file or directory")
-    p.add_argument("--exp",        default=None,
+    p.add_argument("input",         help="Image file or directory")
+    p.add_argument("--exp",         default=None,
                    help="Experiment name under outputs/ (default: best by accuracy)")
-    p.add_argument("--top",        type=int,   default=3)
-    p.add_argument("--min-conf",   type=float, default=0.3,
+    p.add_argument("--top",         type=int,   default=3)
+    p.add_argument("--min-conf",    type=float, default=0.3,
                    help="Reject crops below this confidence (default 0.3)")
-    p.add_argument("--min-area",   type=float, default=0.02,
-                   help="Ignore building regions smaller than this fraction of image (default 0.02)")
-    p.add_argument("--temperature",type=float, default=0.3)
-    p.add_argument("--out",        default=None, help="Save results JSON to this path")
-    p.add_argument("--save-viz",   action="store_true",
-                   help="Save annotated image next to each input")
+    p.add_argument("--min-area",    type=float, default=0.02,
+                   help="Ignore building regions smaller than this fraction of image")
+    p.add_argument("--temperature", type=float, default=0.3)
+    p.add_argument("--out",         default=None, help="Save results JSON to this path")
+    p.add_argument("--save-viz",    action="store_true",
+                   help="Save annotated image alongside each input")
     return p.parse_args()
-
-
-# =============================================================================
-# MODELS
-# =============================================================================
-
-device = "cuda" if torch.cuda.is_available() else "cpu"
-print(f"Device: {device}")
-
-print("Loading SegFormer (ADE20K b2)...")
-seg_processor = SegformerImageProcessor.from_pretrained("nvidia/segformer-b2-finetuned-ade-512-512")
-seg_model = SegformerForSemanticSegmentation.from_pretrained(
-    "nvidia/segformer-b2-finetuned-ade-512-512"
-).to(device).eval()
-
-print("Loading CLIP ViT-B/32...")
-clip_model, clip_preprocess = clip.load("ViT-B/32", device=device)
-clip_model.eval()
 
 
 # =============================================================================
@@ -92,13 +76,12 @@ clip_model.eval()
 # =============================================================================
 
 def find_best_exp():
-    outputs = Path("outputs")
     best_exp, best_acc = None, -1.0
-    for d in outputs.iterdir():
-        metrics_path = d / "metrics.json"
-        if not metrics_path.exists():
+    for d in Path("outputs").iterdir():
+        p = d / "metrics.json"
+        if not p.exists():
             continue
-        with open(metrics_path) as f:
+        with open(p) as f:
             m = json.load(f)
         if m.get("accuracy", 0) > best_acc:
             best_acc = m["accuracy"]
@@ -108,26 +91,44 @@ def find_best_exp():
 
 def load_experiment(exp_name):
     exp_dir = Path("outputs") / exp_name
+
     with open(exp_dir / "class_names.json") as f:
         class_names = json.load(f)
-    prototypes     = np.load("prototypes.npy")     if Path("prototypes.npy").exists()     else None
-    prompt_weights = np.load("prompt_weights.npy") if Path("prompt_weights.npy").exists() else None
-    return class_names, prototypes, prompt_weights
+
+    # Load prompts saved by train_architecture (guarantees alignment with prompt_weights)
+    prompts_path = exp_dir / "prompts.json"
+    if prompts_path.exists():
+        with open(prompts_path) as f:
+            style_prompts = json.load(f)
+    else:
+        # Fallback: rebuild prompts from class names
+        style_prompts = {
+            cls: [
+                f"a {LABEL_DISPLAY.get(cls, cls.replace('_',' ').title())} building",
+                f"{LABEL_DISPLAY.get(cls, cls.replace('_',' ').title())} architecture",
+                f"a building in {LABEL_DISPLAY.get(cls, cls.replace('_',' ').title())} style",
+                f"photo of {LABEL_DISPLAY.get(cls, cls.replace('_',' ').title())} architecture",
+            ]
+            for cls in class_names
+        }
+
+    prototypes     = np.load(exp_dir / "prototypes.npy")     if (exp_dir / "prototypes.npy").exists()     else None
+    prompt_weights = np.load(exp_dir / "prompt_weights.npy") if (exp_dir / "prompt_weights.npy").exists() else None
+
+    return class_names, style_prompts, prototypes, prompt_weights
 
 
-def encode_text(class_names, temperature):
-    """Build prompts and encode with CLIP. Returns (text_features, class_indices)."""
+def encode_text(style_prompts, class_names, clip_model, device):
+    """Encode prompts with CLIP. Returns (text_features, class_indices)."""
     all_prompts, class_indices = [], []
-    for i, cls in enumerate(class_names):
-        label = LABEL_DISPLAY.get(cls, cls.replace("_", " ").title())
-        for prompt in [
-            f"a {label} building",
-            f"{label} architecture",
-            f"a building in {label} style",
-            f"photo of {label} architecture",
-        ]:
+    cls_to_idx = {cls: i for i, cls in enumerate(class_names)}
+
+    for cls, prompts in style_prompts.items():
+        if cls not in cls_to_idx:
+            continue
+        for prompt in prompts:
             all_prompts.append(prompt)
-            class_indices.append(i)
+            class_indices.append(cls_to_idx[cls])
 
     tokens = clip.tokenize(all_prompts).to(device)
     with torch.no_grad():
@@ -140,11 +141,8 @@ def encode_text(class_names, temperature):
 # SEGMENTATION
 # =============================================================================
 
-def segment_buildings(pil_image, min_area_frac):
-    """
-    Run SegFormer on image, return list of building crop dicts:
-        {"bbox": [x1,y1,x2,y2], "area_fraction": float, "crop": PIL.Image}
-    """
+def segment_buildings(pil_image, seg_model, seg_processor, device, min_area_frac):
+    """Return list of {"bbox", "area_fraction", "crop"} dicts, sorted largest first."""
     W, H = pil_image.size
     total_px = W * H
 
@@ -153,7 +151,7 @@ def segment_buildings(pil_image, min_area_frac):
         logits = seg_model(**inputs).logits          # [1 x C x h x w]
 
     upsampled = F.interpolate(logits, size=(H, W), mode="bilinear", align_corners=False)
-    seg_map   = upsampled.argmax(dim=1).squeeze(0).cpu().numpy()  # [H x W]
+    seg_map   = upsampled.argmax(dim=1).squeeze(0).cpu().numpy()
 
     building_mask = np.isin(seg_map, list(BUILDING_IDS))
     if not building_mask.any():
@@ -163,17 +161,16 @@ def segment_buildings(pil_image, min_area_frac):
     crops = []
 
     for comp_id in range(1, n + 1):
-        comp = labeled == comp_id
+        comp      = labeled == comp_id
         area_frac = comp.sum() / total_px
         if area_frac < min_area_frac:
             continue
 
         rows = np.where(comp.any(axis=1))[0]
         cols = np.where(comp.any(axis=0))[0]
-        y1, y2 = int(rows[0]),  int(rows[-1])
-        x1, x2 = int(cols[0]),  int(cols[-1])
+        y1, y2 = int(rows[0]), int(rows[-1])
+        x1, x2 = int(cols[0]), int(cols[-1])
 
-        # Pad bbox
         pad_y = max(1, int((y2 - y1) * BBOX_PAD_FRAC))
         pad_x = max(1, int((x2 - x1) * BBOX_PAD_FRAC))
         y1 = max(0, y1 - pad_y);  y2 = min(H, y2 + pad_y)
@@ -185,7 +182,6 @@ def segment_buildings(pil_image, min_area_frac):
             "crop":          pil_image.crop((x1, y1, x2, y2)),
         })
 
-    # Largest buildings first
     crops.sort(key=lambda c: -c["area_fraction"])
     return crops
 
@@ -195,26 +191,24 @@ def segment_buildings(pil_image, min_area_frac):
 # =============================================================================
 
 def classify_crop(pil_crop, class_names, prototypes, text_features,
-                  class_indices, prompt_weights, temperature, top_k):
+                  class_indices, prompt_weights, temperature, top_k,
+                  clip_model, clip_preprocess, device):
     img_t = clip_preprocess(pil_crop).unsqueeze(0).to(device)
 
     with torch.no_grad(), torch.cuda.amp.autocast(enabled=device == "cuda"):
         feats = clip_model.encode_image(img_t)
-        feats = feats / feats.norm(dim=-1, keepdim=True)   # [1 x D]
+        feats = feats / feats.norm(dim=-1, keepdim=True)
 
     num_classes = len(class_names)
+    raw         = feats @ text_features.T / temperature
+    prompt_sims = torch.sigmoid(raw)
 
-    # Weighted text scores (scatter-add on GPU)
-    raw = feats @ text_features.T / temperature
-    prompt_sims = torch.sigmoid(raw)                       # [1 x P]
-
-    if prompt_weights is not None:
-        w = torch.tensor(prompt_weights, dtype=feats.dtype, device=device)
-    else:
-        w = torch.ones(len(class_indices), dtype=feats.dtype, device=device)
-
+    w   = (torch.tensor(prompt_weights, dtype=feats.dtype, device=device)
+           if prompt_weights is not None
+           else torch.ones(len(class_indices), dtype=feats.dtype, device=device))
     idx = torch.tensor(class_indices, device=device)
-    weighted = prompt_sims * w.unsqueeze(0)
+
+    weighted    = prompt_sims * w.unsqueeze(0)
     text_scores = torch.zeros(1, num_classes, dtype=feats.dtype, device=device)
     text_scores.scatter_add_(1, idx.unsqueeze(0).expand(1, -1), weighted)
     weight_sums = torch.zeros(num_classes, dtype=feats.dtype, device=device)
@@ -222,14 +216,14 @@ def classify_crop(pil_crop, class_names, prototypes, text_features,
     text_scores /= weight_sums.clamp(min=1e-8).unsqueeze(0)
 
     if prototypes is not None:
-        proto_t = torch.tensor(prototypes, dtype=feats.dtype, device=device)
+        proto_t      = torch.tensor(prototypes, dtype=feats.dtype, device=device)
         proto_scores = torch.sigmoid(feats @ proto_t.T / temperature)
-        scores = 0.5 * proto_scores + 0.5 * text_scores
+        scores       = 0.5 * proto_scores + 0.5 * text_scores
     else:
         scores = text_scores
 
     scores_np = scores.squeeze(0).cpu().float().numpy()
-    top_idx = np.argsort(-scores_np)[:top_k]
+    top_idx   = np.argsort(-scores_np)[:top_k]
     return [{"label": class_names[i], "confidence": float(scores_np[i])} for i in top_idx]
 
 
@@ -237,10 +231,8 @@ def classify_crop(pil_crop, class_names, prototypes, text_features,
 # VISUALIZATION
 # =============================================================================
 
-COLORS = ["#FF6B6B", "#4ECDC4", "#45B7D1", "#96CEB4", "#FFEAA7", "#DDA0DD"]
-
 def save_viz(pil_image, buildings, out_path):
-    viz = pil_image.copy()
+    viz  = pil_image.copy()
     draw = ImageDraw.Draw(viz)
     for i, b in enumerate(buildings):
         if "predictions" not in b:
@@ -257,60 +249,37 @@ def save_viz(pil_image, buildings, out_path):
 # MAIN
 # =============================================================================
 
-def process_image(image_path, class_names, prototypes, text_features,
-                  class_indices, prompt_weights, args):
-    try:
-        pil_image = Image.open(image_path).convert("RGB")
-    except Exception as e:
-        return {"image": str(image_path), "error": str(e)}
-
-    crops = segment_buildings(pil_image, args.min_area)
-
-    if not crops:
-        return {"image": str(image_path), "filtered": "no_buildings", "buildings": []}
-
-    buildings = []
-    for crop_info in crops:
-        preds = classify_crop(
-            crop_info["crop"], class_names, prototypes,
-            text_features, class_indices, prompt_weights,
-            args.temperature, args.top,
-        )
-        result = {"bbox": crop_info["bbox"], "area_fraction": crop_info["area_fraction"]}
-
-        if preds and preds[0]["confidence"] >= args.min_conf:
-            result["predictions"] = preds
-        else:
-            result["filtered"] = "low_confidence"
-            result["top_confidence"] = preds[0]["confidence"] if preds else 0.0
-
-        buildings.append(result)
-
-    out = {"image": str(image_path), "buildings": buildings}
-
-    if args.save_viz:
-        viz_path = Path(image_path).with_suffix(".viz.jpg")
-        save_viz(pil_image, buildings, viz_path)
-        out["viz"] = str(viz_path)
-
-    return out
-
-
 def main():
     args = parse_args()
 
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    print(f"Device: {device}")
+
+    # ── Load models ──────────────────────────────────────────────────────────
+    print("Loading SegFormer (ADE20K b2)...")
+    seg_processor = SegformerImageProcessor.from_pretrained("nvidia/segformer-b2-finetuned-ade-512-512")
+    seg_model     = SegformerForSemanticSegmentation.from_pretrained(
+        "nvidia/segformer-b2-finetuned-ade-512-512"
+    ).to(device).eval()
+
+    print("Loading CLIP ViT-B/32...")
+    clip_model, clip_preprocess = clip.load("ViT-B/32", device=device)
+    clip_model.eval()
+
+    # ── Load experiment ───────────────────────────────────────────────────────
     exp_name = args.exp or find_best_exp()
     if not exp_name:
         print("No experiment outputs found. Run train_architecture.py first.")
         return
     print(f"Using experiment: {exp_name}")
 
-    class_names, prototypes, prompt_weights = load_experiment(exp_name)
+    class_names, style_prompts, prototypes, prompt_weights = load_experiment(exp_name)
     print(f"Classes ({len(class_names)}): {', '.join(class_names)}")
 
-    text_features, class_indices = encode_text(class_names, args.temperature)
+    text_features, class_indices = encode_text(style_prompts, class_names, clip_model, device)
 
-    input_path = Path(args.input)
+    # ── Gather images ─────────────────────────────────────────────────────────
+    input_path  = Path(args.input)
     image_paths = (
         sorted(input_path.glob("*.jpg")) + sorted(input_path.glob("*.png"))
         if input_path.is_dir() else [input_path]
@@ -318,22 +287,53 @@ def main():
     print(f"Processing {len(image_paths)} image(s)...\n")
 
     all_results = []
-    for img_path in image_paths:
-        r = process_image(img_path, class_names, prototypes, text_features,
-                          class_indices, prompt_weights, args)
+    for img_path in tqdm(image_paths, unit="img"):
+        try:
+            pil_image = Image.open(img_path).convert("RGB")
+        except Exception as e:
+            all_results.append({"image": str(img_path), "error": str(e)})
+            continue
+
+        crops = segment_buildings(pil_image, seg_model, seg_processor, device, args.min_area)
+
+        if not crops:
+            all_results.append({"image": str(img_path), "filtered": "no_buildings", "buildings": []})
+            tqdm.write(f"  SKIP  {img_path.name}: no buildings detected")
+            continue
+
+        buildings = []
+        for crop_info in crops:
+            preds  = classify_crop(
+                crop_info["crop"], class_names, prototypes,
+                text_features, class_indices, prompt_weights,
+                args.temperature, args.top,
+                clip_model, clip_preprocess, device,
+            )
+            result = {"bbox": crop_info["bbox"], "area_fraction": crop_info["area_fraction"]}
+
+            if preds and preds[0]["confidence"] >= args.min_conf:
+                result["predictions"] = preds
+            else:
+                result["filtered"]        = "low_confidence"
+                result["top_confidence"]  = preds[0]["confidence"] if preds else 0.0
+
+            buildings.append(result)
+
+        r = {"image": str(img_path), "buildings": buildings}
+
+        if args.save_viz:
+            viz_path    = img_path.with_suffix(".viz.jpg")
+            save_viz(pil_image, buildings, viz_path)
+            r["viz"] = str(viz_path)
+
         all_results.append(r)
 
-        if "error" in r:
-            print(f"  ERROR  {img_path.name}: {r['error']}")
-        elif r.get("filtered") == "no_buildings":
-            print(f"  SKIP   {img_path.name}: no buildings detected")
-        else:
-            detected = [b for b in r["buildings"] if "predictions" in b]
-            skipped  = [b for b in r["buildings"] if "filtered" in b]
-            print(f"  OK     {img_path.name}: {len(detected)} building(s), {len(skipped)} low-conf")
-            for b in detected:
-                top = b["predictions"][0]
-                print(f"           {top['label']:30s} {top['confidence']:.3f}  bbox={b['bbox']}")
+        detected = [b for b in buildings if "predictions" in b]
+        skipped  = [b for b in buildings if "filtered"    in b]
+        tqdm.write(f"  OK    {img_path.name}: {len(detected)} building(s), {len(skipped)} low-conf")
+        for b in detected:
+            top = b["predictions"][0]
+            tqdm.write(f"          {top['label']:30s} {top['confidence']:.3f}  bbox={b['bbox']}")
 
     if args.out:
         with open(args.out, "w") as f:
