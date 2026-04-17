@@ -13,7 +13,12 @@ import sys
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 
-CONDA_ENV = "env"
+import shutil, sys
+# Use conda env on Windows, plain python elsewhere
+if shutil.which("conda") and sys.platform == "win32":
+    PYTHON = ["conda", "run", "-n", "env", "python"]
+else:
+    PYTHON = ["python"]
 
 EXPERIMENTS = [
     {
@@ -63,10 +68,7 @@ EXPERIMENTS = [
 
 
 def run_experiment(exp):
-    cmd = [
-        "conda", "run", "-n", CONDA_ENV, "python", "train_architecture.py",
-        "--name", exp["name"],
-    ] + exp["args"]
+    cmd = PYTHON + ["train_architecture.py", "--name", exp["name"]] + exp["args"]
 
     print(f"  Starting: {exp['name']}")
     result = subprocess.run(
