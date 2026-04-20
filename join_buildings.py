@@ -83,6 +83,7 @@ def load_address_points(path):
                 "ssl":            row.get("SSL", "").strip(),
                 "has_condo":      row.get("HAS_CONDO", "N") == "Y",
                 "placement":      row.get("PLACEMENT", "").strip(),
+                "begin_date": row.get("BEGIN_DATE", "").strip(),
             })
     print(f"  {len(points):,} usable address points loaded")
     return points
@@ -161,6 +162,7 @@ def aggregate(address_list):
             "zipcode": "",
             "ssl": "",
             "address_count": 0,
+            "year_built": None,
         }
 
     # Pick the highest-priority type across all addresses
@@ -176,6 +178,19 @@ def aggregate(address_list):
 
     primary = sorted(address_list, key=placement_rank)[0]
 
+    # Extract earliest year from begin_start_date across all addresses
+    year_built = None
+    for a in address_list:
+        d = a.get("begin_date", "")
+        if d:
+            try:
+                year = int(str(d)[:4])
+                if 1800 < year < 2100:
+                    if year_built is None or year < year_built:
+                        year_built = year
+            except (ValueError, TypeError):
+                pass
+
     return {
         "address":          primary["address"],
         "residential_type": best_type or "UNKNOWN",
@@ -184,6 +199,7 @@ def aggregate(address_list):
         "zipcode":          primary["zipcode"],
         "ssl":              primary["ssl"],
         "address_count":    len(address_list),
+        "year_built":       year_built,
     }
 
 
@@ -223,6 +239,7 @@ def build_enriched(features, geometries, matched):
             "address_count":    addr_data["address_count"],
             "centroid_lat":     centroid_lat,
             "centroid_lon":     centroid_lon,
+            "year_built":       addr_data["year_built"],
         }
 
         out_features.append({

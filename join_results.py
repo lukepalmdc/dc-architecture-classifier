@@ -167,6 +167,7 @@ def load_geojson(buildings_path):
             "residential_type": props.get("RESIDENTIAL_TYPE") or props.get("residential_type", ""),
             "lat":              lat,
             "lon":              lon,
+            "year_built":       props.get("year_built", ""),
         }
 
     print(f"  Loaded {len(buildings)} buildings from GeoJSON")
@@ -183,7 +184,7 @@ def write_csv(buildings, aggregated, out_path):
     no_image_cnt = 0
 
     fieldnames = [
-        "objectid", "address", "residential_type", "lat", "lon",
+        "objectid", "address", "residential_type", "year_built", "lat", "lon",
         "status", "predicted_label", "confidence", "other_p", "n_crops",
     ] + [f"score_{cls}" for cls in STYLE_COLS]
 
@@ -202,6 +203,7 @@ def write_csv(buildings, aggregated, out_path):
                     "objectid":         oid,
                     "address":          bld["address"],
                     "residential_type": bld["residential_type"],
+                    "year_built":       bld["year_built"],
                     "lat":              bld["lat"],
                     "lon":              bld["lon"],
                     "status":           result["status"],
