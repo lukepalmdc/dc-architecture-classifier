@@ -6,10 +6,19 @@ Mask2Former (Swin-L, Mapillary Vistas panoptic).
 
 Writes:
   <out_dir>/crops/<objectid_or_stem>/<stem>_<N>.jpg   — cropped building images
-  <out_dir>/manifest.jsonl                             — one record per image
+  <out_dir>/manifest.jsonl                             — one record per image (buildings found only)
+
+Each manifest record:
+  image_id       — Mapillary image ID (filename stem), links back to source image
+  objectid       — address ID, links to DC parcel data
+  primary_crop   — largest building crop (most likely the target address)
+  other_crops    — remaining crops sorted by area descending
+
+Images with no buildings detected are silently skipped.
 
 Usage:
     python segment.py data/images/ --out-dir dc_crops
+    python segment.py data/images/ --out-dir dc_crops --sample 1000
     python segment.py --full-run   --out-dir dc_crops
 """
 
@@ -238,17 +247,25 @@ def main():
                                                building_label_ids, args.min_area))
 
             for meta, pil, crops in zip(valid_metas, pil_images, all_crops):
+                if full_run:
+                    done_ids.add(str(meta.get("objectid")))
+
+                if not crops:
+                    continue   # no buildings detected — skip
+
                 img_path = Path(meta["image_path"])
                 objectid = meta.get("objectid")
-                folder   = str(objectid) if objectid is not None else img_path.stem
+                image_id = img_path.stem   # Mapillary image ID encoded in filename
+                folder   = str(objectid) if objectid is not None else image_id
                 crop_dir = crops_dir / folder
                 crop_dir.mkdir(parents=True, exist_ok=True)
 
+                # crops already sorted largest-first; [0] is the primary building
                 saved_crops = []
                 for n, c in enumerate(crops):
                     x1, y1, x2, y2 = c["bbox"]
                     crop_img  = pil.crop((x1, y1, x2, y2))
-                    crop_name = f"{img_path.stem}_{n}.jpg"
+                    crop_name = f"{image_id}_{n}.jpg"
                     crop_path = crop_dir / crop_name
                     crop_img.save(crop_path, quality=92)
                     saved_crops.append({
@@ -260,17 +277,16 @@ def main():
                     n_crops_total += 1
 
                 record = {
-                    "image":    str(img_path),
-                    "objectid": objectid,
-                    "crops":    saved_crops,
+                    "image_id":    image_id,
+                    "image":       str(img_path),
+                    "objectid":    objectid,
+                    "primary_crop": saved_crops[0],
+                    "other_crops":  saved_crops[1:],
                 }
                 if meta.get("residential_type"):
                     record["residential_type"] = meta["residential_type"]
 
                 manifest_file.write(json.dumps(record) + "\n")
-
-                if full_run:
-                    done_ids.add(str(objectid))
 
         manifest_file.flush()
 
