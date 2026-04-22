@@ -26,46 +26,16 @@ PEXELS_SEARCH = "https://api.pexels.com/v1/search"
 OUTPUT_DIR    = Path("data/styles")
 PER_PAGE      = 80
 
-# Search terms used per building type to focus image results on the right form
-TYPE_TERMS = {
-    "Single Family":     ["house", "single family home"],
-    "Rowhouse":          ["rowhouse", "row house", "townhouse"],
-    "Small Multifamily": ["apartment building", "small multifamily building"],
-    "Large Multifamily": ["apartment building", "residential tower"],
-    "Office":            ["office building", "commercial building"],
-}
-
-# Per-style search terms — combined with type terms to form queries
-STYLE_TERMS = {
-    "Developer Modern":      ["modern", "contemporary"],
-    "Tudor":                 ["tudor style"],
-    "Victorian":             ["victorian"],
-    "Neoclassical":          ["neoclassical"],
-    "Modernist":             ["modernist", "international style"],
-    "Craftsman":             ["craftsman bungalow", "craftsman"],
-    "Contemporary":          ["contemporary"],
-    "Midcentury Modern":     ["midcentury modern", "mid century modern"],
-    "Colonial Revival":      ["colonial revival"],
-    "Cape Cod":              ["cape cod"],
-    "American Foursquare":   ["american foursquare"],
-    "Rowhouse Vernacular":   ["brick rowhouse", "vernacular rowhouse"],
-    "Italianate":            ["italianate"],
-    "Federal":               ["federal style"],
-    "Georgian Revival":      ["georgian revival", "georgian"],
-    "Garden Style":          ["garden style apartment", "garden apartment"],
-    "Postmodern":            ["postmodern"],
-    "Contemporary Glass":    ["contemporary glass building", "glass curtain wall"],
-    "Gothic":                ["gothic"],
-    "Art Deco":              ["art deco"],
-    "Brutalist":             ["brutalist", "brutalism concrete"],
-    "Contemporary Vernacular": ["contemporary vernacular"],
-    "International Style":   ["international style", "modernist curtain wall"],
-    "Gothic Revival":        ["gothic revival"],
-    "Beaux-Arts":            ["beaux arts"],
+TYPE_DISPLAY = {
+    "Single Family House": "single family house",
+    "Rowhouse":            "rowhouse",
+    "Small Multifamily":   "small multifamily",
+    "Large Multifamily":   "large multifamily",
+    "Office":              "office building",
 }
 
 TAXONOMY = {
-    "Single Family": [
+    "Single Family House": [
         "Developer Modern", "Tudor", "Victorian", "Neoclassical", "Modernist",
         "Craftsman", "Contemporary", "Midcentury Modern", "Colonial Revival",
         "Cape Cod", "American Foursquare",
@@ -96,13 +66,7 @@ def make_label(btype, style):
 
 
 def make_queries(btype, style):
-    type_terms  = TYPE_TERMS[btype]
-    style_terms = STYLE_TERMS.get(style, [style.lower()])
-    queries = []
-    for st in style_terms:
-        for tt in type_terms:
-            queries.append(f"{st} {tt}")
-    return queries
+    return [f"{TYPE_DISPLAY[btype]} {style.lower()} style"]
 
 
 def build_categories(type_filter=None, style_filter=None):
