@@ -31,6 +31,7 @@ from pathlib import Path
 import numpy as np
 import torch
 from PIL import Image
+from scipy import ndimage
 from tqdm import tqdm
 from transformers import Mask2FormerForUniversalSegmentation, Mask2FormerImageProcessor
 
@@ -126,20 +127,25 @@ def segment_batch(images, model, processor, device, building_label_ids, min_area
         for seg_info in result["segments_info"]:
             if seg_info["label_id"] not in building_label_ids:
                 continue
-            mask      = seg_map == seg_info["id"]
-            area_frac = mask.sum() / total_px
-            if area_frac < min_area_frac:
-                continue
-            rows = np.where(mask.any(axis=1))[0]
-            cols = np.where(mask.any(axis=0))[0]
-            y1, y2 = int(rows[0]), int(rows[-1])
-            x1, x2 = int(cols[0]), int(cols[-1])
-            bbox   = [x1, y1, x2 + 1, y2 + 1]
-            crops.append({
-                "bbox":          bbox,
-                "area_fraction": float(area_frac),
-                "score":         float(seg_info.get("score", 1.0)),
-            })
+            mask  = seg_map == seg_info["id"]
+            score = float(seg_info.get("score", 1.0))
+
+            # Split merged building regions into connected components
+            labeled, n_comp = ndimage.label(mask)
+            for comp_id in range(1, n_comp + 1):
+                comp      = labeled == comp_id
+                area_frac = comp.sum() / total_px
+                if area_frac < min_area_frac:
+                    continue
+                rows = np.where(comp.any(axis=1))[0]
+                cols = np.where(comp.any(axis=0))[0]
+                y1, y2 = int(rows[0]), int(rows[-1])
+                x1, x2 = int(cols[0]), int(cols[-1])
+                crops.append({
+                    "bbox":          [x1, y1, x2 + 1, y2 + 1],
+                    "area_fraction": float(area_frac),
+                    "score":         score,
+                })
 
         crops.sort(key=lambda c: -c["area_fraction"])
         kept = []
