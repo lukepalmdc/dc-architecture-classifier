@@ -44,6 +44,10 @@ TAXONOMY = {
         "Postmodern", "Neoclassical", "International Style", "Contemporary Glass",
         "Art Deco", "Gothic Revival", "Beaux-Arts", "Brutalist", "Colonial Revival",
     ],
+    "Institutional": [
+        "Postmodern", "Neoclassical", "International Style", "Contemporary Glass",
+        "Art Deco", "Gothic Revival", "Beaux-Arts", "Brutalist", "Colonial Revival",
+    ],
 }
 
 BBOX_COLOR  = "#FF4B4B"
@@ -64,32 +68,47 @@ def parse_args():
 
 @st.cache_data
 def load_manifest(path):
-    records = []
+    # Flatten all crops from every record into individual labelable items
+    items = []
     with open(path) as f:
         for line in f:
             line = line.strip()
-            if line:
-                records.append(json.loads(line))
-    return records
+            if not line:
+                continue
+            r = json.loads(line)
+            all_crops = [r["primary_crop"]] + r.get("other_crops", [])
+            for n, crop in enumerate(all_crops):
+                items.append({
+                    "image_id":  r["image_id"],
+                    "image":     r["image"],
+                    "objectid":  r.get("objectid"),
+                    "crop_path": crop["crop_path"],
+                    "bbox":      crop["bbox"],
+                    "area_fraction": crop["area_fraction"],
+                    "score":     crop["score"],
+                    "crop_index": n,
+                })
+    return items
 
 
 def load_labels(path):
     p = Path(path)
     if p.exists() and p.stat().st_size > 0:
         df = pd.read_csv(p)
-        return {str(r["image_id"]): r for r in df.to_dict("records")}
+        return {str(r["crop_path"]): r for r in df.to_dict("records")}
     return {}
 
 
-def save_label(path, record, building_type, style, labels):
-    image_id = record["image_id"]
-    labels[str(image_id)] = {
-        "image_id":      image_id,
-        "objectid":      record.get("objectid"),
+def save_label(path, item, building_type, style, labels):
+    key = str(item["crop_path"])
+    labels[key] = {
+        "crop_path":     item["crop_path"],
+        "image_id":      item["image_id"],
+        "objectid":      item.get("objectid"),
+        "crop_index":    item["crop_index"],
         "building_type": building_type,
         "style":         style,
-        "crop_path":     record["primary_crop"]["crop_path"],
-        "image_path":    record["image"],
+        "image_path":    item["image"],
     }
     pd.DataFrame(list(labels.values())).to_csv(path, index=False)
 
@@ -131,7 +150,7 @@ def main():
     labels   = load_labels(args.labels)
 
     labeled_ids = set(labels.keys())
-    unlabeled   = [r for r in manifest if str(r["image_id"]) not in labeled_ids]
+    unlabeled   = [item for item in manifest if str(item["crop_path"]) not in labeled_ids]
     done        = len(labeled_ids)
     total       = len(manifest)
 
@@ -155,26 +174,25 @@ def main():
         st.session_state.building_type = None
 
     st.session_state.idx = min(st.session_state.idx, len(unlabeled) - 1)
-    record = unlabeled[st.session_state.idx]
-    crop   = record["primary_crop"]
+    item = unlabeled[st.session_state.idx]
 
     # ── Layout ────────────────────────────────────────────────────────────────
     img_col, ctrl_col = st.columns([3, 1], gap="large")
 
     with img_col:
-        # Original image with bbox
-        buf = draw_bbox_on_image(record["image"], crop["bbox"])
+        buf = draw_bbox_on_image(item["image"], item["bbox"])
         if buf:
             st.image(buf, use_container_width=True,
                      caption="Street view — red box = building being labeled")
         else:
-            st.warning(f"Original image not found: {record['image']}")
+            st.warning(f"Original image not found: {item['image']}")
 
         st.caption(
-            f"objectid **{record.get('objectid', '—')}** · "
-            f"image_id `{record['image_id']}` · "
-            f"area {crop['area_fraction']:.1%} · "
-            f"score {crop['score']:.2f} · "
+            f"objectid **{item.get('objectid', '—')}** · "
+            f"image_id `{item['image_id']}` · "
+            f"crop {item['crop_index']} · "
+            f"area {item['area_fraction']:.1%} · "
+            f"score {item['score']:.2f} · "
             f"{st.session_state.idx + 1} of {len(unlabeled)} remaining"
         )
 
@@ -203,7 +221,7 @@ def main():
             for i, style in enumerate(styles):
                 if cols[i % 2].button(style, key=f"style_{st.session_state.building_type}_{style}",
                                       use_container_width=True):
-                    save_label(args.labels, record,
+                    save_label(args.labels, item,
                                st.session_state.building_type, style, labels)
                     st.session_state.building_type = None
                     st.session_state.idx = min(
@@ -216,7 +234,7 @@ def main():
         # ── Navigation / utilities ─────────────────────────────────────────
         u1, u2 = st.columns(2)
         if u1.button("Unsure", use_container_width=True):
-            save_label(args.labels, record,
+            save_label(args.labels, item,
                        st.session_state.building_type or "unknown", "unsure", labels)
             st.session_state.building_type = None
             st.session_state.idx = min(st.session_state.idx, len(unlabeled) - 2)
