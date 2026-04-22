@@ -22,7 +22,7 @@ import streamlit as st
 from PIL import Image, ImageDraw
 
 TAXONOMY = {
-    "Single Family": [
+    "Single Family House": [
         "Developer Modern", "Tudor", "Victorian", "Neoclassical", "Modernist",
         "Craftsman", "Contemporary", "Midcentury Modern", "Colonial Revival",
         "Cape Cod", "American Foursquare",
