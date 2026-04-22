@@ -174,7 +174,9 @@ def main():
 
     print(f"Loading {MODEL_ID} ...")
     processor = Mask2FormerImageProcessor.from_pretrained(MODEL_ID)
-    model     = Mask2FormerForUniversalSegmentation.from_pretrained(MODEL_ID).to(device).eval().half()
+    model     = Mask2FormerForUniversalSegmentation.from_pretrained(
+        MODEL_ID, torch_dtype=torch.float16
+    ).to(device).eval()
 
     building_label_ids = {
         lid for lid, name in model.config.id2label.items()
