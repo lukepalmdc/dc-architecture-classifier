@@ -215,6 +215,15 @@ def main():
     done_ids      = load_checkpoint(checkpoint_path) if full_run else set()
     n_crops_total = 0
 
+    # Deduplicate existing manifest entries before appending
+    written_ids = set()
+    if manifest_path.exists():
+        with open(manifest_path) as f:
+            for line in f:
+                line = line.strip()
+                if line:
+                    written_ids.add(json.loads(line).get("image_id"))
+
     manifest_file = open(manifest_path, "a")
 
     with ThreadPoolExecutor(max_workers=PREFETCH) as loader:
@@ -290,7 +299,9 @@ def main():
                 if meta.get("residential_type"):
                     record["residential_type"] = meta["residential_type"]
 
-                manifest_file.write(json.dumps(record) + "\n")
+                if image_id not in written_ids:
+                    manifest_file.write(json.dumps(record) + "\n")
+                    written_ids.add(image_id)
 
         manifest_file.flush()
 
