@@ -38,7 +38,6 @@ MODEL_ID      = "facebook/mask2former-swin-large-mapillary-vistas-panoptic"
 SEG_BATCH     = 4      # images per forward pass (tuned for 24 GB VRAM)
 IMAGE_BATCH   = 4
 PREFETCH      = 8
-BBOX_PAD_FRAC = 0.05
 MIN_AREA_FRAC = 0.06   # crop must cover >= this fraction of image pixels
 IOU_THRESH    = 0.4    # dedup threshold
 
@@ -135,10 +134,7 @@ def segment_batch(images, model, processor, device, building_label_ids, min_area
             cols = np.where(mask.any(axis=0))[0]
             y1, y2 = int(rows[0]), int(rows[-1])
             x1, x2 = int(cols[0]), int(cols[-1])
-            pad_y  = max(1, int((y2 - y1) * BBOX_PAD_FRAC))
-            pad_x  = max(1, int((x2 - x1) * BBOX_PAD_FRAC))
-            bbox   = [max(0, x1-pad_x), max(0, y1-pad_y),
-                      min(W, x2+pad_x), min(H, y2+pad_y)]
+            bbox   = [x1, y1, x2 + 1, y2 + 1]
             crops.append({
                 "bbox":          bbox,
                 "area_fraction": float(area_frac),
