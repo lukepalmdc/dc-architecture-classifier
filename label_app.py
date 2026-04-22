@@ -207,7 +207,7 @@ def main():
                         unsafe_allow_html=True)
             cols = st.columns(2)
             for i, style in enumerate(styles):
-                if cols[i % 2].button(style, key=f"style_{style}",
+                if cols[i % 2].button(style, key=f"style_{st.session_state.building_type}_{style}",
                                       use_container_width=True):
                     save_label(args.labels, record,
                                st.session_state.building_type, style, labels)
