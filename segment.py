@@ -2,7 +2,8 @@
 segment.py
 
 Extract building crops from street-level images using
-Mask2Former (Swin-L, Mapillary Vistas panoptic).
+SegFormer-b0 (ADE20K) with 3-strip tiling and per-pixel confidence filtering.
+Connected components separate individual buildings within each strip mask.
 
 Writes:
   <out_dir>/crops/<objectid_or_stem>/<stem>_<N>.jpg   — cropped building images
@@ -30,16 +31,21 @@ from pathlib import Path
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 from PIL import Image
 from scipy import ndimage
 from tqdm import tqdm
-from transformers import Mask2FormerForUniversalSegmentation, Mask2FormerImageProcessor
+from transformers import SegformerImageProcessor, SegformerForSemanticSegmentation
 
-MODEL_ID      = "facebook/mask2former-swin-large-mapillary-vistas-panoptic"
-SEG_BATCH     = 4      # images per forward pass (tuned for 24 GB VRAM)
+MODEL_ID      = "nvidia/segformer-b0-finetuned-ade-512-512"
+# ADE20K building class IDs (0-indexed): building, house, skyscraper, tower
+BUILDING_IDS  = {1, 25, 48, 84}
+SEG_BATCH     = 12     # strips per SegFormer forward pass
+SEG_CONF      = 0.5    # per-pixel confidence threshold
+SEG_SCORE_MIN = 0.65   # min mean confidence across component pixels
 IMAGE_BATCH   = 4
 PREFETCH      = 8
-MIN_AREA_FRAC = 0.06   # crop must cover >= this fraction of image pixels
+MIN_AREA_FRAC = 0.06   # crop must cover >= this fraction of strip pixels
 IOU_THRESH    = 0.4    # dedup threshold
 
 
@@ -54,6 +60,7 @@ def parse_args():
     p.add_argument("--full-run",  action="store_true")
     p.add_argument("--db",        default="data/image_status.db")
     p.add_argument("--min-area",  type=float, default=MIN_AREA_FRAC)
+    p.add_argument("--min-score", type=float, default=SEG_SCORE_MIN)
     p.add_argument("--out-dir",   default="dc_crops")
     p.add_argument("--sample",    type=int, default=None)
     p.add_argument("--seed",      type=int, default=42)
@@ -103,59 +110,78 @@ def iou(a, b):
     return inter / ((a[2]-a[0])*(a[3]-a[1]) + (b[2]-b[0])*(b[3]-b[1]) - inter)
 
 
-def segment_batch(images, model, processor, device, building_label_ids, min_area_frac):
-    inputs = processor(images=images, return_tensors="pt")
-    inputs = {k: v.to(device=device, dtype=torch.float16 if v.is_floating_point() else v.dtype)
-              for k, v in inputs.items()}
+def segment_batch(images, model, processor, device, min_area_frac, min_score):
+    # Build 3 overlapping strips per image (60% width, offset at 0/20/40%)
+    strip_meta, strip_pils = [], []
+    for img_idx, pil in enumerate(images):
+        W, H = pil.size
+        sw   = int(W * 0.6)
+        for x0 in [0, int(W * 0.2), int(W * 0.4)]:
+            x1 = min(x0 + sw, W)
+            strip_meta.append((img_idx, x0, W, H, x1 - x0))
+            strip_pils.append(pil.crop((x0, 0, x1, H)))
 
-    target_sizes = [(img.height, img.width) for img in images]
+    per_image = [[] for _ in images]
 
-    with torch.no_grad():
-        outputs = model(**inputs)
+    for i in range(0, len(strip_pils), SEG_BATCH):
+        batch_pils = strip_pils[i:i + SEG_BATCH]
+        batch_meta = strip_meta[i:i + SEG_BATCH]
 
-    results = processor.post_process_panoptic_segmentation(
-        outputs, target_sizes=target_sizes
-    )
+        inputs = processor(images=batch_pils, return_tensors="pt")
+        inputs = {k: v.to(device=device, dtype=torch.float16 if v.is_floating_point() else v.dtype)
+                  for k, v in inputs.items()}
+        with torch.no_grad():
+            logits = model(**inputs).logits   # [B x C x h x w]
 
-    per_image = []
-    for pil, result in zip(images, results):
-        W, H     = pil.size
-        total_px = W * H
-        seg_map  = result["segmentation"].cpu().numpy()   # H x W, value = segment id
+        for j, (img_idx, x_off, full_W, full_H, sW) in enumerate(batch_meta):
+            up       = F.interpolate(logits[j:j+1], size=(full_H, sW),
+                                     mode="bilinear", align_corners=False)
+            probs    = F.softmax(up, dim=1)
+            seg_map  = probs.argmax(dim=1).squeeze(0).cpu().numpy()
+            max_prob = probs.max(dim=1).values.squeeze(0).cpu().numpy()
 
-        crops = []
-        for seg_info in result["segments_info"]:
-            if seg_info["label_id"] not in building_label_ids:
+            # Building mask with per-pixel confidence gate
+            mask = np.isin(seg_map, list(BUILDING_IDS)) & (max_prob >= SEG_CONF)
+            if not mask.any():
                 continue
-            mask  = seg_map == seg_info["id"]
-            score = float(seg_info.get("score", 1.0))
 
-            # Split merged building regions into connected components
+            strip_px = sW * full_H
+            full_px  = full_W * full_H
+
+            # Connected components → individual buildings
             labeled, n_comp = ndimage.label(mask)
             for comp_id in range(1, n_comp + 1):
-                comp      = labeled == comp_id
-                area_frac = comp.sum() / total_px
-                if area_frac < min_area_frac:
+                comp = labeled == comp_id
+                if comp.sum() / strip_px < min_area_frac:
+                    continue
+                mean_conf = float(max_prob[comp].mean())
+                if mean_conf < min_score:
                     continue
                 rows = np.where(comp.any(axis=1))[0]
                 cols = np.where(comp.any(axis=0))[0]
                 y1, y2 = int(rows[0]), int(rows[-1])
-                x1, x2 = int(cols[0]), int(cols[-1])
-                crops.append({
+                x1 = int(cols[0]) + x_off
+                x2 = int(cols[-1]) + x_off
+                # Drop crops wider than half the full image — likely multi-building span
+                if (x2 - x1) > full_W * 0.5:
+                    continue
+                per_image[img_idx].append({
                     "bbox":          [x1, y1, x2 + 1, y2 + 1],
-                    "area_fraction": float(area_frac),
-                    "score":         score,
+                    "area_fraction": float(comp.sum() / full_px),
+                    "score":         mean_conf,
                 })
 
+    # Dedup and sort per image
+    out = []
+    for crops in per_image:
         crops.sort(key=lambda c: -c["area_fraction"])
         kept = []
         for cand in crops:
             if all(iou(cand["bbox"], k["bbox"]) < IOU_THRESH for k in kept):
                 kept.append(cand)
+        out.append(kept)
 
-        per_image.append(kept)
-
-    return per_image
+    return out
 
 
 # =============================================================================
@@ -175,17 +201,12 @@ def main():
     print(f"Device: {device}")
 
     print(f"Loading {MODEL_ID} ...")
-    processor = Mask2FormerImageProcessor.from_pretrained(MODEL_ID)
-    model     = Mask2FormerForUniversalSegmentation.from_pretrained(
-        MODEL_ID, torch_dtype=torch.float16
+    processor  = SegformerImageProcessor.from_pretrained(MODEL_ID)
+    dtype      = torch.float16 if device == "cuda" else torch.float32
+    model      = SegformerForSemanticSegmentation.from_pretrained(
+        MODEL_ID, torch_dtype=dtype
     ).to(device).eval()
-
-    building_label_ids = {
-        lid for lid, name in model.config.id2label.items()
-        if "building" in name.lower()
-    }
-    building_names = {model.config.id2label[lid] for lid in building_label_ids}
-    print(f"Building classes ({len(building_label_ids)}): {building_names}")
+    print(f"Building class IDs (ADE20K): {BUILDING_IDS}  |  min_score={args.min_score}  |  min_area={args.min_area}")
 
     # ── Gather images ──────────────────────────────────────────────────────────
     out_dir         = Path(args.out_dir)
@@ -210,12 +231,12 @@ def main():
             print(f"Sampled {args.sample} images")
         metas = [{"objectid": None, "image_path": str(p)} for p in paths]
 
-    print(f"Processing {len(metas)} images  |  seg_batch={SEG_BATCH}\n")
+    print(f"Processing {len(metas)} images  |  seg_batch={SEG_BATCH} strips\n")
 
     done_ids      = load_checkpoint(checkpoint_path) if full_run else set()
     n_crops_total = 0
 
-    # Deduplicate existing manifest entries before appending
+    # Track already-written image_ids to avoid duplicates on re-run
     written_ids = set()
     if manifest_path.exists():
         with open(manifest_path) as f:
@@ -252,34 +273,27 @@ def main():
             if not pil_images:
                 continue
 
-            # Run in SEG_BATCH-sized sub-batches
-            all_crops = []
-            for i in range(0, len(pil_images), SEG_BATCH):
-                chunk = pil_images[i:i + SEG_BATCH]
-                all_crops.extend(segment_batch(chunk, model, processor, device,
-                                               building_label_ids, args.min_area))
+            all_crops = segment_batch(pil_images, model, processor, device, args.min_area, args.min_score)
 
             for meta, pil, crops in zip(valid_metas, pil_images, all_crops):
                 if full_run:
                     done_ids.add(str(meta.get("objectid")))
 
                 if not crops:
-                    continue   # no buildings detected — skip
+                    continue
 
                 img_path = Path(meta["image_path"])
                 objectid = meta.get("objectid")
-                image_id = img_path.stem   # Mapillary image ID encoded in filename
+                image_id = img_path.stem
                 folder   = str(objectid) if objectid is not None else image_id
                 crop_dir = crops_dir / folder
                 crop_dir.mkdir(parents=True, exist_ok=True)
 
-                # crops already sorted largest-first; [0] is the primary building
                 saved_crops = []
                 for n, c in enumerate(crops):
                     x1, y1, x2, y2 = c["bbox"]
                     crop_img  = pil.crop((x1, y1, x2, y2))
-                    crop_name = f"{image_id}_{n}.jpg"
-                    crop_path = crop_dir / crop_name
+                    crop_path = crop_dir / f"{image_id}_{n}.jpg"
                     crop_img.save(crop_path, quality=92)
                     saved_crops.append({
                         "crop_path":     str(crop_path),
@@ -289,17 +303,16 @@ def main():
                     })
                     n_crops_total += 1
 
-                record = {
-                    "image_id":    image_id,
-                    "image":       str(img_path),
-                    "objectid":    objectid,
-                    "primary_crop": saved_crops[0],
-                    "other_crops":  saved_crops[1:],
-                }
-                if meta.get("residential_type"):
-                    record["residential_type"] = meta["residential_type"]
-
                 if image_id not in written_ids:
+                    record = {
+                        "image_id":     image_id,
+                        "image":        str(img_path),
+                        "objectid":     objectid,
+                        "primary_crop": saved_crops[0],
+                        "other_crops":  saved_crops[1:],
+                    }
+                    if meta.get("residential_type"):
+                        record["residential_type"] = meta["residential_type"]
                     manifest_file.write(json.dumps(record) + "\n")
                     written_ids.add(image_id)
 
