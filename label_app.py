@@ -170,12 +170,6 @@ def main():
         else:
             st.warning(f"Original image not found: {record['image']}")
 
-        # Crop
-        if Path(crop["crop_path"]).exists():
-            st.image(crop["crop_path"], width=400, caption="Crop")
-        else:
-            st.warning(f"Crop not found: {crop['crop_path']}")
-
         st.caption(
             f"objectid **{record.get('objectid', '—')}** · "
             f"image_id `{record['image_id']}` · "
