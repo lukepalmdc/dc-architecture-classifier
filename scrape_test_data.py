@@ -218,7 +218,7 @@ def scrape_all(categories, key, per_class):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--key",       default=os.environ.get("PEXELS_KEY", ""))
-    parser.add_argument("--per-class", type=int, default=500)
+    parser.add_argument("--per-class", type=int, default=320)
     parser.add_argument("--type",      type=str, default=None,
                         help="Filter by building type (e.g. rowhouse, office)")
     parser.add_argument("--style",     type=str, default=None,
