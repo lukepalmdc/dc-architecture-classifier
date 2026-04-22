@@ -177,9 +177,9 @@ def main():
     item = unlabeled[st.session_state.idx]
 
     # ── Layout ────────────────────────────────────────────────────────────────
-    img_col, ctrl_col = st.columns([3, 1], gap="large")
+    ctx_col, crop_col, ctrl_col = st.columns([3, 2, 1], gap="large")
 
-    with img_col:
+    with ctx_col:
         buf = draw_bbox_on_image(item["image"], item["bbox"])
         if buf:
             st.image(buf, use_container_width=True,
@@ -195,6 +195,20 @@ def main():
             f"score {item['score']:.2f} · "
             f"{st.session_state.idx + 1} of {len(unlabeled)} remaining"
         )
+
+    with crop_col:
+        crop_path = item.get("crop_path")
+        if crop_path and Path(crop_path).exists():
+            try:
+                crop_img = Image.open(crop_path).convert("RGB")
+                buf2 = BytesIO()
+                crop_img.save(buf2, format="JPEG", quality=88)
+                buf2.seek(0)
+                st.image(buf2, use_container_width=True, caption="Isolated crop")
+            except Exception:
+                st.warning("Could not load crop image.")
+        else:
+            st.info("No saved crop found.")
 
     with ctrl_col:
         # ── Step 1: building type ──────────────────────────────────────────
