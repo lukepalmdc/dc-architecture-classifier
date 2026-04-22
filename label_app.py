@@ -31,16 +31,16 @@ TAXONOMY = {
         "Developer Modern", "Rowhouse Vernacular", "Italianate", "Victorian",
         "Modernist", "Colonial Revival", "Federal", "Georgian Revival",
     ],
-    "Small Multifamily": [
+    "Small Multifamily Building": [
         "Modernist", "Colonial Revival", "Developer Modern", "Garden Style",
         "Italianate", "Victorian",
     ],
-    "Large Multifamily": [
+    "Large Multifamily Building": [
         "Postmodern", "Contemporary Glass", "Developer Modern", "Gothic",
         "Art Deco", "Brutalist", "Colonial Revival", "Neoclassical",
         "Contemporary Vernacular", "International Style",
     ],
-    "Office": [
+    "Office Building": [
         "Postmodern", "Neoclassical", "International Style", "Contemporary Glass",
         "Art Deco", "Gothic Revival", "Beaux-Arts", "Brutalist", "Colonial Revival",
     ],

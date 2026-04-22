@@ -29,9 +29,9 @@ PER_PAGE      = 80
 TYPE_DISPLAY = {
     "Single Family House": "single family house",
     "Rowhouse":            "rowhouse",
-    "Small Multifamily":   "small multifamily",
-    "Large Multifamily":   "large multifamily",
-    "Office":              "office building",
+    "Small Multifamily Building": "small multifamily building",
+    "Large Multifamily Building": "large multifamily building",
+    "Office Building":     "office building",
 }
 
 TAXONOMY = {
@@ -44,16 +44,16 @@ TAXONOMY = {
         "Developer Modern", "Rowhouse Vernacular", "Italianate", "Victorian",
         "Modernist", "Colonial Revival", "Federal", "Georgian Revival",
     ],
-    "Small Multifamily": [
+    "Small Multifamily Building": [
         "Modernist", "Colonial Revival", "Developer Modern", "Garden Style",
         "Italianate", "Victorian",
     ],
-    "Large Multifamily": [
+    "Large Multifamily Building": [
         "Postmodern", "Contemporary Glass", "Developer Modern", "Gothic",
         "Art Deco", "Brutalist", "Colonial Revival", "Neoclassical",
         "Contemporary Vernacular", "International Style",
     ],
-    "Office": [
+    "Office Building": [
         "Postmodern", "Neoclassical", "International Style", "Contemporary Glass",
         "Art Deco", "Gothic Revival", "Beaux-Arts", "Brutalist", "Colonial Revival",
     ],
