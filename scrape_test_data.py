@@ -27,18 +27,20 @@ OUTPUT_DIR    = Path("data/styles")
 PER_PAGE      = 80
 
 TYPE_DISPLAY = {
-    "Single Family House": "single family house",
-    "Rowhouse":            "rowhouse",
+    "Single Family House":        "single family house",
+    "Rowhouse":                   "rowhouse",
     "Small Multifamily Building": "small multifamily building",
     "Large Multifamily Building": "large multifamily building",
-    "Office Building":     "office building",
+    "Office Building":            "office building",
+    "Institutional":              "institutional building",
 }
 
 TAXONOMY = {
     "Single Family House": [
-        "Developer Modern", "Tudor", "Victorian", "Neoclassical", "Modernist",
-        "Craftsman", "Contemporary", "Midcentury Modern", "Colonial Revival",
-        "Cape Cod", "American Foursquare",
+        "Developer Modern", "Developer Traditional", "Tudor", "Victorian",
+        "Neoclassical", "Modernist", "Craftsman", "Contemporary",
+        "Midcentury Modern", "Colonial Revival", "Cape Cod",
+        "American Foursquare", "Second Empire",
     ],
     "Rowhouse": [
         "Developer Modern", "Rowhouse Vernacular", "Italianate", "Victorian",
@@ -56,6 +58,11 @@ TAXONOMY = {
     "Office Building": [
         "Postmodern", "Neoclassical", "International Style", "Contemporary Glass",
         "Art Deco", "Gothic Revival", "Beaux-Arts", "Brutalist", "Colonial Revival",
+    ],
+    "Institutional": [
+        "Postmodern", "Neoclassical", "International Style", "Contemporary Glass",
+        "Art Deco", "Gothic Revival", "Beaux-Arts", "Brutalist", "Colonial Revival",
+        "Italianate",
     ],
 }
 
@@ -169,7 +176,7 @@ def scrape_all(categories, key, per_class):
                     seen_ids.add(p["id"])
                     all_photos.append(p)
         all_photos = all_photos[:per_class]
-        print(f"  Downloading {len(all_photos)} → data/styles/{label}/")
+        print(f"  Downloading {len(all_photos)} -> data/styles/{label}/")
         download_images(all_photos, OUTPUT_DIR / label)
 
     print("\n--- Summary ---")
