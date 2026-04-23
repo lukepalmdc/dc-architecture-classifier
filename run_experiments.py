@@ -19,6 +19,24 @@ PYTHON = ["conda", "run", "-n", "env", "python"] if shutil.which("conda") and sy
 
 DC_LABELS = "dc_labels.csv"
 
+KNN_EXPERIMENTS = [
+    {
+        "name":   "knn_condensed_k10",
+        "script": "knn_probe.py",
+        "args":   ["--style-only", "--condense", "--k", "10", "--dc-labels", DC_LABELS],
+    },
+    {
+        "name":   "knn_condensed_k20",
+        "script": "knn_probe.py",
+        "args":   ["--style-only", "--condense", "--k", "20", "--dc-labels", DC_LABELS],
+    },
+    {
+        "name":   "knn_condensed_k50",
+        "script": "knn_probe.py",
+        "args":   ["--style-only", "--condense", "--k", "50", "--dc-labels", DC_LABELS],
+    },
+]
+
 PROBE_EXPERIMENTS = [
     {
         "name":   "probe_condensed_C01",
@@ -96,7 +114,7 @@ def print_comparison():
     print("-" * 100)
 
     rows = []
-    for exp in EXPERIMENTS + PROBE_EXPERIMENTS:
+    for exp in EXPERIMENTS + PROBE_EXPERIMENTS + KNN_EXPERIMENTS:
         m_pexels = load_metrics(exp["name"])
         m_dc     = load_metrics(exp["name"], suffix="_dc")
         if m_pexels:
@@ -134,7 +152,7 @@ def main():
         print_comparison()
         return
 
-    all_exps = EXPERIMENTS + PROBE_EXPERIMENTS
+    all_exps = EXPERIMENTS + PROBE_EXPERIMENTS + KNN_EXPERIMENTS
     print(f"Running {len(all_exps)} experiments ({args.workers} parallel)...\n")
 
     failed = []
