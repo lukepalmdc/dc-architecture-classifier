@@ -182,7 +182,6 @@ def train_probe(train_feats, train_labels):
         C=args.probe_C,
         max_iter=1000,
         solver="lbfgs",
-        multi_class="multinomial",
         n_jobs=-1,
         verbose=0,
     )
