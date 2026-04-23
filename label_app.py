@@ -23,9 +23,10 @@ from PIL import Image, ImageDraw
 
 TAXONOMY = {
     "Single Family House": [
-        "Developer Modern", "Tudor", "Victorian", "Neoclassical", "Modernist",
-        "Craftsman", "Contemporary", "Midcentury Modern", "Colonial Revival",
-        "Cape Cod", "American Foursquare",
+        "Developer Modern", "Developer Traditional", "Tudor", "Victorian",
+        "Neoclassical", "Modernist", "Craftsman", "Contemporary",
+        "Midcentury Modern", "Colonial Revival", "Cape Cod",
+        "American Foursquare", "Second Empire",
     ],
     "Rowhouse": [
         "Developer Modern", "Rowhouse Vernacular", "Italianate", "Victorian",
@@ -47,6 +48,7 @@ TAXONOMY = {
     "Institutional": [
         "Postmodern", "Neoclassical", "International Style", "Contemporary Glass",
         "Art Deco", "Gothic Revival", "Beaux-Arts", "Brutalist", "Colonial Revival",
+        "Italianate",
     ],
 }
 
@@ -68,7 +70,8 @@ def parse_args():
 
 @st.cache_data
 def load_manifest(path):
-    # Flatten all crops from every record into individual labelable items
+    # Flatten all crops from every record; dedupe by crop_path to handle re-runs
+    seen_crop_paths = set()
     items = []
     with open(path) as f:
         for line in f:
@@ -78,15 +81,19 @@ def load_manifest(path):
             r = json.loads(line)
             all_crops = [r["primary_crop"]] + r.get("other_crops", [])
             for n, crop in enumerate(all_crops):
+                cp = crop["crop_path"]
+                if cp in seen_crop_paths:
+                    continue
+                seen_crop_paths.add(cp)
                 items.append({
-                    "image_id":  r["image_id"],
-                    "image":     r["image"],
-                    "objectid":  r.get("objectid"),
-                    "crop_path": crop["crop_path"],
-                    "bbox":      crop["bbox"],
+                    "image_id":      r["image_id"],
+                    "image":         r["image"],
+                    "objectid":      r.get("objectid"),
+                    "crop_path":     cp,
+                    "bbox":          crop["bbox"],
                     "area_fraction": crop["area_fraction"],
-                    "score":     crop["score"],
-                    "crop_index": n,
+                    "score":         crop["score"],
+                    "crop_index":    n,
                 })
     return items
 
