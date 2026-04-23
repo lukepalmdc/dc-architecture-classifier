@@ -109,6 +109,8 @@ def parse_args():
     p.add_argument("--delay",          type=float, default=0.2,
                    help="Seconds between requests per worker (default 0.2)")
     p.add_argument("--max-retries",    type=int, default=3)
+    p.add_argument("--api-key",        type=str, default=None,
+                   help="Gemini API key (falls back to GEMINI_API_KEY env var)")
     return p.parse_args()
 
 
@@ -116,7 +118,8 @@ args    = parse_args()
 OUT_DIR = f"{args.out_dir}/{args.name}"
 os.makedirs(OUT_DIR, exist_ok=True)
 
-client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY", ""))
+_api_key = args.api_key or os.environ.get("GEMINI_API_KEY", "")
+client = genai.Client(api_key=_api_key)
 
 
 # =============================================================================
@@ -365,8 +368,8 @@ print(f"Model:   {args.model}")
 print(f"Workers: {args.workers}  delay: {args.delay}s")
 print(f"Output:  {OUT_DIR}")
 
-if not os.environ.get("GEMINI_API_KEY"):
-    raise SystemExit("ERROR: set GEMINI_API_KEY env var")
+if not _api_key:
+    raise SystemExit("ERROR: pass --api-key or set GEMINI_API_KEY env var")
 
 if args.dc_labels:
     eval_dc(args.dc_labels)
