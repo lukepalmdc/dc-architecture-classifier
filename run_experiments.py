@@ -19,6 +19,24 @@ PYTHON = ["conda", "run", "-n", "env", "python"] if shutil.which("conda") and sy
 
 DC_LABELS = "dc_labels.csv"
 
+PROBE_EXPERIMENTS = [
+    {
+        "name":   "probe_condensed_C01",
+        "script": "linear_probe.py",
+        "args":   ["--style-only", "--condense", "--probe-C", "0.1", "--dc-labels", DC_LABELS],
+    },
+    {
+        "name":   "probe_condensed_C1",
+        "script": "linear_probe.py",
+        "args":   ["--style-only", "--condense", "--probe-C", "1.0", "--dc-labels", DC_LABELS],
+    },
+    {
+        "name":   "probe_condensed_C10",
+        "script": "linear_probe.py",
+        "args":   ["--style-only", "--condense", "--probe-C", "10.0", "--dc-labels", DC_LABELS],
+    },
+]
+
 EXPERIMENTS = [
     # Condensed 14-class (best expected real-world accuracy)
     {
@@ -55,8 +73,9 @@ EXPERIMENTS = [
 
 
 def run_experiment(exp):
-    cmd = PYTHON + ["train_architecture.py", "--name", exp["name"]] + exp["args"]
-    print(f"  Starting: {exp['name']}")
+    script = exp.get("script", "train_architecture.py")
+    cmd = PYTHON + [script, "--name", exp["name"]] + exp["args"]
+    print(f"  Starting: {exp['name']} ({script})")
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
         return exp["name"], None, result.stderr[-1000:]
@@ -77,7 +96,7 @@ def print_comparison():
     print("-" * 100)
 
     rows = []
-    for exp in EXPERIMENTS:
+    for exp in EXPERIMENTS + PROBE_EXPERIMENTS:
         m_pexels = load_metrics(exp["name"])
         m_dc     = load_metrics(exp["name"], suffix="_dc")
         if m_pexels:
@@ -115,11 +134,12 @@ def main():
         print_comparison()
         return
 
-    print(f"Running {len(EXPERIMENTS)} experiments ({args.workers} parallel)...\n")
+    all_exps = EXPERIMENTS + PROBE_EXPERIMENTS
+    print(f"Running {len(all_exps)} experiments ({args.workers} parallel)...\n")
 
     failed = []
     with ProcessPoolExecutor(max_workers=args.workers) as pool:
-        futures = {pool.submit(run_experiment, exp): exp for exp in EXPERIMENTS}
+        futures = {pool.submit(run_experiment, exp): exp for exp in all_exps}
         for future in as_completed(futures):
             name, exp, err = future.result()
             if err:
