@@ -25,6 +25,7 @@ Usage:
 
 import argparse
 import json
+import shutil
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -43,7 +44,7 @@ BUILDING_IDS  = {1, 25, 48, 84}
 SEG_BATCH     = 12     # strips per SegFormer forward pass
 SEG_CONF      = 0.5    # per-pixel confidence threshold
 SEG_SCORE_MIN = 0.65   # min mean confidence across component pixels
-IMAGE_BATCH   = 4
+IMAGE_BATCH   = 6
 PREFETCH      = 8
 MIN_AREA_FRAC = 0.06   # crop must cover >= this fraction of strip pixels
 IOU_THRESH    = 0.4    # dedup threshold
@@ -64,6 +65,8 @@ def parse_args():
     p.add_argument("--out-dir",   default="dc_crops")
     p.add_argument("--sample",    type=int, default=None)
     p.add_argument("--seed",      type=int, default=42)
+    p.add_argument("--clear",     action="store_true",
+                   help="Delete existing crops and manifest before starting")
     return p.parse_args()
 
 
@@ -211,9 +214,20 @@ def main():
     # ── Gather images ──────────────────────────────────────────────────────────
     out_dir         = Path(args.out_dir)
     crops_dir       = out_dir / "crops"
-    crops_dir.mkdir(parents=True, exist_ok=True)
     checkpoint_path = out_dir / "checkpoint.json"
     manifest_path   = out_dir / "manifest.jsonl"
+
+    if args.clear:
+        if crops_dir.exists():
+            shutil.rmtree(crops_dir)
+            print(f"Cleared {crops_dir}")
+        if manifest_path.exists():
+            manifest_path.unlink()
+            print(f"Cleared {manifest_path}")
+        if checkpoint_path.exists():
+            checkpoint_path.unlink()
+
+    crops_dir.mkdir(parents=True, exist_ok=True)
     full_run        = args.full_run or not args.input
 
     if full_run:
@@ -244,6 +258,13 @@ def main():
                 line = line.strip()
                 if line:
                     written_ids.add(json.loads(line).get("image_id"))
+
+    # In directory mode use written_ids as the resume set; skip already-done images
+    if not full_run:
+        before = len(metas)
+        metas = [m for m in metas if Path(m["image_path"]).stem not in written_ids]
+        if before != len(metas):
+            print(f"Resuming: skipping {before - len(metas)} already-processed images")
 
     manifest_file = open(manifest_path, "a")
 
@@ -321,6 +342,8 @@ def main():
         if full_run and len(done_ids) % 500 == 0:
             save_checkpoint(checkpoint_path, done_ids)
             tqdm.write(f"  checkpoint: {len(done_ids)} done, {n_crops_total} crops saved")
+        elif not full_run and batch_idx % 500 == 0 and batch_idx > 0:
+            tqdm.write(f"  batch {batch_idx}/{len(batches)}  crops so far: {n_crops_total}")
 
     manifest_file.close()
     if full_run:

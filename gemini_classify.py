@@ -16,12 +16,11 @@ Usage:
 """
 
 import argparse
+import asyncio
 import json
 import os
-import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from typing import Literal, Optional
+from typing import Literal
 
 import numpy as np
 import pandas as pd
@@ -31,6 +30,7 @@ from sklearn.metrics import accuracy_score, confusion_matrix, f1_score
 from tqdm import tqdm
 
 from google import genai
+from google.genai import types
 
 # =============================================================================
 # STYLES
@@ -103,14 +103,16 @@ def parse_args():
     p.add_argument("--dc-labels",      type=str, default=None)
     p.add_argument("--pexels-sample",  type=int, default=None,
                    help="Number of Pexels holdout images to evaluate (default: skip)")
-    p.add_argument("--model",          type=str, default="gemini-2.5-flash-preview-04-17")
-    p.add_argument("--workers",        type=int, default=4,
-                   help="Parallel Gemini requests (default 4, respect rate limits)")
-    p.add_argument("--delay",          type=float, default=0.2,
-                   help="Seconds between requests per worker (default 0.2)")
+    p.add_argument("--model",          type=str, default="gemini-3.1-flash-lite-preview")
+    p.add_argument("--concurrency",    type=int, default=10,
+                   help="Max parallel async requests (default 10)")
+    p.add_argument("--delay",          type=float, default=0.0,
+                   help="Seconds to sleep after each request (default 0)")
     p.add_argument("--max-retries",    type=int, default=3)
     p.add_argument("--api-key",        type=str, default=None,
                    help="Gemini API key (falls back to GEMINI_API_KEY env var)")
+    p.add_argument("--test",           action="store_true",
+                   help="Run a single test call and exit")
     return p.parse_args()
 
 
@@ -120,6 +122,28 @@ os.makedirs(OUT_DIR, exist_ok=True)
 
 _api_key = args.api_key or os.environ.get("GEMINI_API_KEY", "")
 client = genai.Client(api_key=_api_key)
+
+
+# =============================================================================
+# TOKEN USAGE TRACKING
+# =============================================================================
+
+_token_lock = asyncio.Lock()  # initialised before any tasks run
+_usage = {"prompt": 0, "output": 0, "total": 0}
+
+
+async def _add_usage(meta):
+    if meta is None:
+        return
+    async with _token_lock:
+        _usage["prompt"] += getattr(meta, "prompt_token_count",    0) or 0
+        _usage["output"] += getattr(meta, "candidates_token_count", 0) or 0
+        _usage["total"]  += getattr(meta, "total_token_count",      0) or 0
+
+
+def print_usage():
+    print(f"\nToken usage:  prompt={_usage['prompt']:,}  "
+          f"output={_usage['output']:,}  total={_usage['total']:,}")
 
 
 # =============================================================================
@@ -146,46 +170,71 @@ def slug_to_display(slug):
     return mapping.get(slug, "Other")
 
 
+def _load_image_bytes(image_path):
+    """Read image bytes + detect mime type (JPEG or PNG)."""
+    path = Path(image_path)
+    suffix = path.suffix.lower()
+    mime = "image/png" if suffix == ".png" else "image/jpeg"
+    with open(path, "rb") as f:
+        return f.read(), mime
+
+
 # =============================================================================
-# GEMINI CALL
+# ASYNC GEMINI CALL
 # =============================================================================
 
-def classify_image(image_path, retries=None):
-    if retries is None:
-        retries = args.max_retries
-    img = Image.open(image_path).convert("RGB")
-    for attempt in range(retries):
-        try:
-            response = client.models.generate_content(
-                model=args.model,
-                contents=[img, PROMPT],
-                config={
-                    "response_mime_type": "application/json",
-                    "response_json_schema": BuildingClassification.model_json_schema(),
-                },
-            )
-            result = BuildingClassification.model_validate_json(response.text)
-            if args.delay > 0:
-                time.sleep(args.delay)
-            return result
-        except Exception as e:
-            if attempt < retries - 1:
-                time.sleep(2 ** attempt)
-            else:
-                return None
+async def classify_image_async(image_path, sem):
+    loop = asyncio.get_running_loop()
+    # Load image bytes off the event loop thread
+    img_bytes, mime = await loop.run_in_executor(None, _load_image_bytes, image_path)
+    image_part = types.Part.from_bytes(data=img_bytes, mime_type=mime)
+
+    config = types.GenerateContentConfig(
+        response_mime_type="application/json",
+        response_json_schema=BuildingClassification.model_json_schema(),
+    )
+
+    async with sem:
+        for attempt in range(args.max_retries):
+            try:
+                response = await client.aio.models.generate_content(
+                    model=args.model,
+                    contents=[image_part, PROMPT],
+                    config=config,
+                )
+                await _add_usage(getattr(response, "usage_metadata", None))
+                result = BuildingClassification.model_validate_json(response.text)
+                if args.delay > 0:
+                    await asyncio.sleep(args.delay)
+                return result
+            except Exception as exc:
+                wait = 2 ** attempt
+                if attempt < args.max_retries - 1:
+                    await asyncio.sleep(wait)
+                else:
+                    tqdm.write(f"  [error] {Path(image_path).name}: {exc}")
+                    return None
 
 
 # =============================================================================
 # BATCH CLASSIFY
 # =============================================================================
 
-def classify_batch(paths, desc="Classifying"):
+async def classify_batch(paths, desc="Classifying"):
+    sem = asyncio.Semaphore(args.concurrency)
+
+    async def _run(i, p):
+        result = await classify_image_async(p, sem)
+        return i, result
+
+    tasks = [asyncio.create_task(_run(i, p)) for i, p in enumerate(paths)]
     results = [None] * len(paths)
-    with ThreadPoolExecutor(max_workers=args.workers) as ex:
-        futures = {ex.submit(classify_image, p): i for i, p in enumerate(paths)}
-        for fut in tqdm(as_completed(futures), total=len(futures), desc=desc):
-            idx = futures[fut]
-            results[idx] = fut.result()
+    pbar = tqdm(total=len(tasks), desc=desc)
+    for coro in asyncio.as_completed(tasks):
+        i, result = await coro
+        results[i] = result
+        pbar.update(1)
+    pbar.close()
     return results
 
 
@@ -193,41 +242,12 @@ def classify_batch(paths, desc="Classifying"):
 # EVALUATION
 # =============================================================================
 
-def top_k_accuracy(probs, labels, k=3):
-    topk = np.argsort(-probs, axis=1)[:, :k]
-    return np.mean([labels[i] in topk[i] for i in range(len(labels))])
-
-
-def results_to_probs(classifications, class_names):
-    cls_to_idx = {c: i for i, c in enumerate(class_names)}
-    n = len(classifications)
-    probs = np.zeros((n, len(class_names)))
-    for i, clf in enumerate(classifications):
-        if clf is None:
-            continue
-        style = clf.style
-        idx = cls_to_idx.get(style)
-        if idx is not None:
-            conf_map = {"High": 0.9, "Medium": 0.7, "Low": 0.5}
-            conf = conf_map.get(clf.confidence, 0.7)
-            probs[i, idx] = conf
-            # distribute remaining probability uniformly
-            remaining = (1 - conf) / max(1, len(class_names) - 1)
-            for j in range(len(class_names)):
-                if j != idx:
-                    probs[i, j] = remaining
-        else:
-            probs[i] = 1.0 / len(class_names)
-    return probs
-
-
 def evaluate_and_export(classifications, true_labels, class_names, save_dir, tag):
     cls_to_idx = {c: i for i, c in enumerate(class_names)}
-    preds = []
     valid_true, valid_pred = [], []
     rows = []
 
-    for i, (clf, true_idx) in enumerate(zip(classifications, true_labels)):
+    for clf, true_idx in zip(classifications, true_labels):
         if clf is None:
             pred_style = "API error"
             pred_idx   = -1
@@ -236,13 +256,12 @@ def evaluate_and_export(classifications, true_labels, class_names, save_dir, tag
             pred_idx   = cls_to_idx.get(pred_style, -1)
 
         true_style = class_names[true_idx] if 0 <= true_idx < len(class_names) else "?"
-        preds.append(pred_idx)
         rows.append({
-            "true_style":  true_style,
-            "pred_style":  pred_style,
-            "confidence":  clf.confidence if clf else None,
-            "reasoning":   clf.reasoning  if clf else None,
-            "correct":     pred_idx == true_idx,
+            "true_style": true_style,
+            "pred_style": pred_style,
+            "confidence": clf.confidence if clf else None,
+            "reasoning":  clf.reasoning  if clf else None,
+            "correct":    pred_idx == true_idx,
         })
         if pred_idx >= 0:
             valid_true.append(true_idx)
@@ -259,7 +278,6 @@ def evaluate_and_export(classifications, true_labels, class_names, save_dir, tag
     acc = accuracy_score(valid_true, valid_pred)
     f1m = f1_score(valid_true, valid_pred, average="macro",    zero_division=0)
     f1w = f1_score(valid_true, valid_pred, average="weighted", zero_division=0)
-    top1 = sum(t == p for t, p in zip(valid_true, valid_pred)) / len(valid_pred)
 
     metrics = {
         "accuracy":    float(acc),
@@ -268,6 +286,9 @@ def evaluate_and_export(classifications, true_labels, class_names, save_dir, tag
         "n_valid":     len(valid_pred),
         "n_total":     len(classifications),
         "api_errors":  sum(1 for c in classifications if c is None),
+        "tokens_prompt": _usage["prompt"],
+        "tokens_output": _usage["output"],
+        "tokens_total":  _usage["total"],
     }
     with open(f"{save_dir}/metrics.json", "w") as f:
         json.dump(metrics, f, indent=2)
@@ -287,10 +308,9 @@ def evaluate_and_export(classifications, true_labels, class_names, save_dir, tag
 # DC EVAL
 # =============================================================================
 
-def eval_dc(labels_path):
+async def eval_dc(labels_path):
     df = pd.read_csv(labels_path)
     df = df[~df["style"].isin(["unsure", "Other", "other"])]
-    has_type = "building_type" in df.columns
 
     cls_to_idx = {s: i for i, s in enumerate(CONDENSED_STYLES)}
     paths, true_labels = [], []
@@ -311,16 +331,17 @@ def eval_dc(labels_path):
     if not paths:
         return
 
-    classifications = classify_batch(paths, desc="DC crops")
+    classifications = await classify_batch(paths, desc="DC crops")
     evaluate_and_export(classifications, true_labels, CONDENSED_STYLES,
                         save_dir=f"{OUT_DIR}_dc", tag="DC crops")
+    print_usage()
 
 
 # =============================================================================
 # PEXELS EVAL
 # =============================================================================
 
-def eval_pexels(n_sample):
+async def eval_pexels(n_sample):
     root = Path(args.data_dir)
     cls_to_idx = {s: i for i, s in enumerate(CONDENSED_STYLES)}
 
@@ -340,7 +361,6 @@ def eval_pexels(n_sample):
             all_paths.append(img)
             all_labels.append(cls_to_idx[display])
 
-    # Reproduce same test split as train_architecture.py (seed=42, 20%)
     np.random.seed(42)
     idx = np.random.permutation(len(all_paths))
     split = int(len(idx) * 0.8)
@@ -355,27 +375,74 @@ def eval_pexels(n_sample):
         test_labels = [test_labels[i] for i in chosen]
 
     print(f"\nPexels holdout: {len(test_paths)} images")
-    classifications = classify_batch(test_paths, desc="Pexels holdout")
+    classifications = await classify_batch(test_paths, desc="Pexels holdout")
     evaluate_and_export(classifications, test_labels, CONDENSED_STYLES,
                         save_dir=f"{OUT_DIR}_pexels", tag="Pexels holdout")
+    print_usage()
 
 
 # =============================================================================
 # MAIN
 # =============================================================================
 
-print(f"Model:   {args.model}")
-print(f"Workers: {args.workers}  delay: {args.delay}s")
-print(f"Output:  {OUT_DIR}")
+async def run_test():
+    """Send one image through the full pipeline and print the result."""
+    # Find the first valid image from dc_labels or data/styles
+    test_path = None
+    if args.dc_labels and Path(args.dc_labels).exists():
+        df = pd.read_csv(args.dc_labels)
+        df = df[~df["style"].isin(["unsure", "Other", "other"])]
+        for _, row in df.iterrows():
+            p = Path(row["crop_path"])
+            if p.exists():
+                test_path = p
+                break
+    if test_path is None:
+        root = Path(args.data_dir)
+        for folder in sorted(root.iterdir()):
+            if not folder.is_dir():
+                continue
+            imgs = list(folder.glob("*.jpg")) + list(folder.glob("*.jpeg")) + list(folder.glob("*.png"))
+            if imgs:
+                test_path = imgs[0]
+                break
 
-if not _api_key:
-    raise SystemExit("ERROR: pass --api-key or set GEMINI_API_KEY env var")
+    if test_path is None:
+        raise SystemExit("No test image found. Pass --dc-labels or check --data-dir.")
 
-if args.dc_labels:
-    eval_dc(args.dc_labels)
+    print(f"Test image: {test_path}")
+    sem = asyncio.Semaphore(1)
+    result = await classify_image_async(test_path, sem)
+    if result is None:
+        print("FAILED - check error above")
+    else:
+        print(f"  style:      {result.style}")
+        print(f"  confidence: {result.confidence}")
+        print(f"  reasoning:  {result.reasoning}")
+        print_usage()
 
-if args.pexels_sample:
-    eval_pexels(args.pexels_sample)
 
-if not args.dc_labels and not args.pexels_sample:
-    print("Nothing to do — pass --dc-labels and/or --pexels-sample")
+async def main():
+    print(f"Model:       {args.model}")
+    print(f"Concurrency: {args.concurrency}  delay: {args.delay}s")
+    print(f"Output:      {OUT_DIR}")
+
+    if not _api_key:
+        raise SystemExit("ERROR: pass --api-key or set GEMINI_API_KEY env var")
+
+    if args.test:
+        await run_test()
+        return
+
+    if args.dc_labels:
+        await eval_dc(args.dc_labels)
+
+    if args.pexels_sample:
+        await eval_pexels(args.pexels_sample)
+
+    if not args.dc_labels and not args.pexels_sample:
+        print("Nothing to do -- pass --dc-labels and/or --pexels-sample")
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
