@@ -44,6 +44,17 @@ TYPE_DISPLAY = {
 }
 TYPE_KEYS = sorted(TYPE_DISPLAY.keys(), key=len, reverse=True)
 
+# Condensed 14-class taxonomy — anything not listed maps to "other"
+KEEP_STYLES = {
+    "rowhouse_vernacular", "colonial_revival", "developer_modern",
+    "italianate", "victorian", "contemporary_glass", "garden_style",
+    "art_deco", "developer_traditional", "neoclassical", "brutalist",
+    "beaux_arts", "modernist",
+}
+
+def condense_style(slug):
+    return slug if slug in KEEP_STYLES else "other"
+
 
 def parse_args():
     p = argparse.ArgumentParser()
@@ -66,6 +77,8 @@ def parse_args():
                    help="Path to dc_labels.csv for real-world evaluation")
     p.add_argument("--style-only",     action="store_true", default=False,
                    help="Collapse type+style folders into style-only classes")
+    p.add_argument("--condense",       action="store_true", default=False,
+                   help="Collapse rare styles into 'other' (14-class taxonomy)")
     return p.parse_args()
 
 
@@ -85,6 +98,7 @@ USE_PROTOTYPES = args.use_prototypes
 USE_WEIGHTS    = args.use_weights
 TEMPERATURE    = args.temperature
 STYLE_ONLY     = args.style_only
+CONDENSE       = args.condense
 OUT_DIR        = f"{args.out_dir}/{args.name}"
 
 torch.set_num_threads(NUM_THREADS)
@@ -126,6 +140,8 @@ def load_dataset(root_dir, style_only=False):
         if not imgs:
             continue
         cls = _style_slug_from_folder(folder.name) if style_only else folder.name
+        if CONDENSE and style_only:
+            cls = condense_style(cls)
         if cls not in class_to_idx:
             class_to_idx[cls] = len(class_to_idx)
         idx = class_to_idx[cls]
@@ -411,6 +427,8 @@ def eval_on_dc_labels(labels_path, class_names, prototypes, prompt_weights):
     skipped = 0
     for _, row in df.iterrows():
         slug = _slug(row["style"]) if STYLE_ONLY else f"{_slug(row['building_type'])}_{_slug(row['style'])}"
+        if CONDENSE:
+            slug = condense_style(slug)
         if slug not in cls_to_idx:
             skipped += 1
             continue

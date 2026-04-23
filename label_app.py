@@ -21,15 +21,12 @@ import pandas as pd
 import streamlit as st
 from PIL import Image, ImageDraw
 
-ALL_STYLES = sorted({
-    "American Foursquare", "Art Deco", "Beaux-Arts", "Brutalist",
-    "Cape Cod", "Colonial Revival", "Contemporary", "Contemporary Glass",
-    "Contemporary Vernacular", "Craftsman", "Developer Modern",
-    "Developer Traditional", "Federal", "Garden Style", "Georgian Revival",
-    "Gothic", "Gothic Revival", "International Style", "Italianate",
-    "Midcentury Modern", "Modernist", "Neoclassical", "Postmodern",
-    "Rowhouse Vernacular", "Second Empire", "Tudor", "Victorian",
-})
+ALL_STYLES = [
+    "Rowhouse Vernacular", "Colonial Revival", "Developer Modern",
+    "Italianate", "Victorian", "Contemporary Glass", "Garden Style",
+    "Art Deco", "Developer Traditional", "Neoclassical", "Brutalist",
+    "Beaux-Arts", "Modernist", "Other",
+]
 
 BBOX_COLOR  = "#FF4B4B"
 BBOX_WIDTH  = 4

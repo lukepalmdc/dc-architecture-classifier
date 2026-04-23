@@ -20,28 +20,32 @@ PYTHON = ["conda", "run", "-n", "env", "python"] if shutil.which("conda") and sy
 DC_LABELS = "dc_labels.csv"
 
 EXPERIMENTS = [
-    # Style-only (fewer classes, more training images per class)
+    # Condensed 14-class (best expected real-world accuracy)
     {
-        "name": "style_temp02",
-        "args": ["--style-only", "--use-prototypes", "--use-weights", "--tune-alpha",
-                 "--temperature", "0.2", "--prompts", "build", "--dc-labels", DC_LABELS],
+        "name": "condensed_temp02",
+        "args": ["--style-only", "--condense", "--use-prototypes", "--use-weights",
+                 "--tune-alpha", "--temperature", "0.2", "--prompts", "build",
+                 "--dc-labels", DC_LABELS],
     },
+    {
+        "name": "condensed_temp03",
+        "args": ["--style-only", "--condense", "--use-prototypes", "--use-weights",
+                 "--tune-alpha", "--temperature", "0.3", "--prompts", "build",
+                 "--dc-labels", DC_LABELS],
+    },
+    {
+        "name": "condensed_temp04",
+        "args": ["--style-only", "--condense", "--use-prototypes", "--use-weights",
+                 "--tune-alpha", "--temperature", "0.4", "--prompts", "build",
+                 "--dc-labels", DC_LABELS],
+    },
+    # Full style-only (27 classes) for comparison
     {
         "name": "style_temp03",
         "args": ["--style-only", "--use-prototypes", "--use-weights", "--tune-alpha",
                  "--temperature", "0.3", "--prompts", "build", "--dc-labels", DC_LABELS],
     },
-    {
-        "name": "style_temp04",
-        "args": ["--style-only", "--use-prototypes", "--use-weights", "--tune-alpha",
-                 "--temperature", "0.4", "--prompts", "build", "--dc-labels", DC_LABELS],
-    },
-    {
-        "name": "style_temp03_text_only",
-        "args": ["--style-only", "--no-prototypes", "--use-weights",
-                 "--temperature", "0.3", "--prompts", "build", "--dc-labels", DC_LABELS],
-    },
-    # Hierarchical type+style (56 classes)
+    # Hierarchical (56 classes) for comparison
     {
         "name": "hier_temp03",
         "args": ["--use-prototypes", "--use-weights", "--tune-alpha",
