@@ -21,36 +21,15 @@ import pandas as pd
 import streamlit as st
 from PIL import Image, ImageDraw
 
-TAXONOMY = {
-    "Single Family House": [
-        "Developer Modern", "Developer Traditional", "Tudor", "Victorian",
-        "Neoclassical", "Modernist", "Craftsman", "Contemporary",
-        "Midcentury Modern", "Colonial Revival", "Cape Cod",
-        "American Foursquare", "Second Empire",
-    ],
-    "Rowhouse": [
-        "Developer Modern", "Rowhouse Vernacular", "Italianate", "Victorian",
-        "Modernist", "Colonial Revival", "Federal", "Georgian Revival",
-    ],
-    "Small Multifamily Building": [
-        "Modernist", "Colonial Revival", "Developer Modern", "Garden Style",
-        "Italianate", "Victorian",
-    ],
-    "Large Multifamily Building": [
-        "Postmodern", "Contemporary Glass", "Developer Modern", "Gothic",
-        "Art Deco", "Brutalist", "Colonial Revival", "Neoclassical",
-        "Contemporary Vernacular", "International Style",
-    ],
-    "Office Building": [
-        "Postmodern", "Neoclassical", "International Style", "Contemporary Glass",
-        "Art Deco", "Gothic Revival", "Beaux-Arts", "Brutalist", "Colonial Revival",
-    ],
-    "Institutional": [
-        "Postmodern", "Neoclassical", "International Style", "Contemporary Glass",
-        "Art Deco", "Gothic Revival", "Beaux-Arts", "Brutalist", "Colonial Revival",
-        "Italianate",
-    ],
-}
+ALL_STYLES = sorted({
+    "American Foursquare", "Art Deco", "Beaux-Arts", "Brutalist",
+    "Cape Cod", "Colonial Revival", "Contemporary", "Contemporary Glass",
+    "Contemporary Vernacular", "Craftsman", "Developer Modern",
+    "Developer Traditional", "Federal", "Garden Style", "Georgian Revival",
+    "Gothic", "Gothic Revival", "International Style", "Italianate",
+    "Midcentury Modern", "Modernist", "Neoclassical", "Postmodern",
+    "Rowhouse Vernacular", "Second Empire", "Tudor", "Victorian",
+})
 
 BBOX_COLOR  = "#FF4B4B"
 BBOX_WIDTH  = 4
@@ -106,16 +85,15 @@ def load_labels(path):
     return {}
 
 
-def save_label(path, item, building_type, style, labels):
+def save_label(path, item, style, labels):
     key = str(item["crop_path"])
     labels[key] = {
-        "crop_path":     item["crop_path"],
-        "image_id":      item["image_id"],
-        "objectid":      item.get("objectid"),
-        "crop_index":    item["crop_index"],
-        "building_type": building_type,
-        "style":         style,
-        "image_path":    item["image"],
+        "crop_path":  item["crop_path"],
+        "image_id":   item["image_id"],
+        "objectid":   item.get("objectid"),
+        "crop_index": item["crop_index"],
+        "style":      style,
+        "image_path": item["image"],
     }
     pd.DataFrame(list(labels.values())).to_csv(path, index=False)
 
@@ -177,8 +155,6 @@ def main():
     # ── Session state ─────────────────────────────────────────────────────────
     if "idx" not in st.session_state:
         st.session_state.idx = 0
-    if "building_type" not in st.session_state:
-        st.session_state.building_type = None
 
     st.session_state.idx = min(st.session_state.idx, len(unlabeled) - 1)
     item = unlabeled[st.session_state.idx]
@@ -218,60 +194,31 @@ def main():
             st.info("No saved crop found.")
 
     with ctrl_col:
-        # ── Step 1: building type ──────────────────────────────────────────
-        st.markdown("#### 1 · Building type")
-        for btype in TAXONOMY:
-            active = st.session_state.building_type == btype
-            if st.button(
-                ("✓ " if active else "") + btype,
-                key=f"type_{btype}",
-                use_container_width=True,
-                type="primary" if active else "secondary",
-            ):
-                st.session_state.building_type = btype
+        st.markdown("#### Style")
+        cols = st.columns(2)
+        for i, style in enumerate(ALL_STYLES):
+            if cols[i % 2].button(style, key=f"style_{style}", use_container_width=True):
+                save_label(args.labels, item, style, labels)
+                st.session_state.idx = min(st.session_state.idx, len(unlabeled) - 2)
                 st.rerun()
 
         st.divider()
 
-        # ── Step 2: style (only shown after type selected) ─────────────────
-        if st.session_state.building_type:
-            styles = TAXONOMY[st.session_state.building_type]
-            st.markdown(f"#### 2 · Style  <span style='color:#888;font-size:13px'>{st.session_state.building_type}</span>",
-                        unsafe_allow_html=True)
-            cols = st.columns(2)
-            for i, style in enumerate(styles):
-                if cols[i % 2].button(style, key=f"style_{st.session_state.building_type}_{style}",
-                                      use_container_width=True):
-                    save_label(args.labels, item,
-                               st.session_state.building_type, style, labels)
-                    st.session_state.building_type = None
-                    st.session_state.idx = min(
-                        st.session_state.idx, len(unlabeled) - 2
-                    )
-                    st.rerun()
-
-            st.divider()
-
         # ── Navigation / utilities ─────────────────────────────────────────
         u1, u2 = st.columns(2)
         if u1.button("Unsure", use_container_width=True):
-            save_label(args.labels, item,
-                       st.session_state.building_type or "unknown", "unsure", labels)
-            st.session_state.building_type = None
+            save_label(args.labels, item, "unsure", labels)
             st.session_state.idx = min(st.session_state.idx, len(unlabeled) - 2)
             st.rerun()
         if u2.button("Skip", use_container_width=True):
-            st.session_state.building_type = None
             st.session_state.idx = min(st.session_state.idx + 1, len(unlabeled) - 1)
             st.rerun()
 
         n1, n2 = st.columns(2)
         if n1.button("← Prev", use_container_width=True) and st.session_state.idx > 0:
-            st.session_state.building_type = None
             st.session_state.idx -= 1
             st.rerun()
         if n2.button("Next →", use_container_width=True):
-            st.session_state.building_type = None
             st.session_state.idx = min(st.session_state.idx + 1, len(unlabeled) - 1)
             st.rerun()
 
