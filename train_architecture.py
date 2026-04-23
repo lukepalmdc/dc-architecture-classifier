@@ -64,6 +64,8 @@ def parse_args():
     p.add_argument("--num-threads",    type=int, default=8)
     p.add_argument("--dc-labels",      type=str, default=None,
                    help="Path to dc_labels.csv for real-world evaluation")
+    p.add_argument("--style-only",     action="store_true", default=False,
+                   help="Collapse type+style folders into style-only classes")
     return p.parse_args()
 
 
@@ -82,6 +84,7 @@ RIDGE_ALPHA    = args.ridge_alpha
 USE_PROTOTYPES = args.use_prototypes
 USE_WEIGHTS    = args.use_weights
 TEMPERATURE    = args.temperature
+STYLE_ONLY     = args.style_only
 OUT_DIR        = f"{args.out_dir}/{args.name}"
 
 torch.set_num_threads(NUM_THREADS)
@@ -101,9 +104,19 @@ model.eval()
 # DATA
 # =============================================================================
 
-def load_dataset(root_dir):
+def _style_slug_from_folder(folder_name):
+    """Strip type prefix: 'rowhouse_federal' -> 'federal'"""
+    for prefix in TYPE_KEYS:
+        if folder_name.startswith(prefix + "_"):
+            return folder_name[len(prefix) + 1:]
+    return folder_name
+
+
+def load_dataset(root_dir, style_only=False):
     root = Path(root_dir)
-    image_paths, labels, class_names = [], [], []
+    image_paths, labels = [], []
+    class_to_idx = {}
+
     for folder in sorted(root.iterdir()):
         if not folder.is_dir():
             continue
@@ -112,11 +125,15 @@ def load_dataset(root_dir):
         imgs = [p for p in folder.glob("*") if p.suffix.lower() in {".jpg", ".jpeg", ".png"}]
         if not imgs:
             continue
-        idx = len(class_names)
-        class_names.append(folder.name)
+        cls = _style_slug_from_folder(folder.name) if style_only else folder.name
+        if cls not in class_to_idx:
+            class_to_idx[cls] = len(class_to_idx)
+        idx = class_to_idx[cls]
         for img in imgs:
             image_paths.append(img)
             labels.append(idx)
+
+    class_names = [k for k, _ in sorted(class_to_idx.items(), key=lambda x: x[1])]
     return image_paths, np.array(labels), class_names
 
 
@@ -130,7 +147,7 @@ def train_test_split(paths, labels, test_ratio=0.2, seed=42):
             [paths[i] for i in test_idx],  labels[test_idx])
 
 
-image_paths, labels, class_names = load_dataset(DATA_DIR)
+image_paths, labels, class_names = load_dataset(DATA_DIR, style_only=STYLE_ONLY)
 num_classes = len(class_names)
 print(f"Loaded {len(image_paths)} images across {num_classes} classes")
 
@@ -153,23 +170,25 @@ def parse_class(cls):
     return None, cls.replace("_", " ")
 
 
-def build_prompts(class_names):
+def build_prompts(class_names, style_only=False):
     prompts = {}
     for cls in class_names:
         btype, style = parse_class(cls)
-        if btype:
-            prompts[cls] = [
-                f"a {style} {btype}",
-                f"a {btype} in {style} style",
-                f"{style} style {btype}",
-                f"photo of a {style} {btype}",
-            ]
-        else:
+        if style_only or not btype:
+            # Style-only: no type context, broader prompts
             prompts[cls] = [
                 f"a {style} building",
                 f"{style} architecture",
                 f"a building in {style} style",
                 f"photo of {style} architecture",
+                f"{style} style architecture",
+            ]
+        else:
+            prompts[cls] = [
+                f"a {style} {btype}",
+                f"a {btype} in {style} style",
+                f"{style} style {btype}",
+                f"photo of a {style} {btype}",
             ]
     return prompts
 
@@ -179,7 +198,7 @@ def load_prompts(json_path):
         return json.load(f)
 
 
-STYLE_PROMPTS = build_prompts(class_names) if args.prompts == "build" else load_prompts(args.prompts)
+STYLE_PROMPTS = build_prompts(class_names, style_only=STYLE_ONLY) if args.prompts == "build" else load_prompts(args.prompts)
 
 
 # =============================================================================
@@ -391,7 +410,7 @@ def eval_on_dc_labels(labels_path, class_names, prototypes, prompt_weights):
     crop_paths, true_labels = [], []
     skipped = 0
     for _, row in df.iterrows():
-        slug = f"{_slug(row['building_type'])}_{_slug(row['style'])}"
+        slug = _slug(row["style"]) if STYLE_ONLY else f"{_slug(row['building_type'])}_{_slug(row['style'])}"
         if slug not in cls_to_idx:
             skipped += 1
             continue
@@ -418,7 +437,7 @@ def eval_on_dc_labels(labels_path, class_names, prototypes, prompt_weights):
 # =============================================================================
 
 print(f"\nExperiment: {args.name}")
-print(f"  prototypes={USE_PROTOTYPES}  weights={USE_WEIGHTS}  "
+print(f"  style_only={STYLE_ONLY}  prototypes={USE_PROTOTYPES}  weights={USE_WEIGHTS}  "
       f"tune_alpha={TUNE_ALPHA}  ridge={RIDGE_ALPHA}  temp={TEMPERATURE}")
 
 prototypes     = build_prototypes(train_paths, train_labels, num_classes) if USE_PROTOTYPES else None
